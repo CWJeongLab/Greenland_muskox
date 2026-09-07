@@ -1,0 +1,77 @@
+##################################################################
+##### 1. Calculate correlation between introgressed segments #####
+##################################################################
+
+cd /home/projects1/UmingmakMuskox/analysis/admixfrog/admixfrog_250821
+
+pt1=($(pwd)"/")
+indf=${pt1}"Muskox.admixfrog.260115.ind"
+listf=${pt1}"Muskox_island_ind_260130.txt"
+ref="/home/References/Muskox/O.moschatus_RAN27_v1.0/RAN27_v1.0.fa"
+of1=${pt1}"Correlation_segments_260130.txt"
+
+len=($(awk '{ if ($1>=1 && $1<= 23) sum += $2}END{print sum}' ${ref}.fai)) 
+
+cat ${indf}|grep -e CaIS -e CaIN | grep -v -e BGM -e GRL | cut -f1,3 > temp_ind
+cut -f2 temp_ind |cut -d"_" -f1|paste temp_ind - > ${listf}
+
+echo "Type IID1 PID1 Group1 IID2 PID2 Group2 Alpha1 Alpha2 Common Correlation" > ${of1}
+
+for typ in BGM; do 
+    while read iid1 pid1 gid1; do 
+        tfn1=${pt1}"segments/"${iid1}"/"${iid1}"."${typ}".bed" # $1=chr, $2=start, $3=end, $4=length
+        a1=($(awk -v len=$len '{ if ($1>=1 && $1<= 23) sum += ($3-$2)}END{print sum/len}' ${tfn1} ))
+        while read iid2 pid2 gid2; do 
+            tfn2=${pt1}"segments/"${iid2}"/"${iid2}"."${typ}".bed" # $1=chr, $2=start, $3=end, $4=length
+            a2=($(awk -v len=$len '{ if ($1>=1 && $1<= 23) sum += ($3-$2)}END{print sum/len}' ${tfn2} ))
+            com=($(bedtools intersect -a ${tfn1} -b ${tfn2}|awk -v len=$len '{ if ($1>=1 && $1<= 23) sum += ($3-$2)}END{print sum/len}'))
+            if [[ $iid1 != $iid2 ]]; then 
+                echo ${typ} ${iid1} ${pid1} ${gid1} ${iid2} ${pid2} ${gid2} ${a1} ${a2} ${com} \
+                |awk '{if ($8 != 0 && $9 != 0) print $0,($10 - $8*$9)/sqrt($8*(1-$8)*$9*(1-$9)); \
+                else print $0,0}' >> ${of1}
+            fi 
+        done < <(tail -n +2 ${listf})
+    done < <(tail -n +2 ${listf})
+done 
+
+#################################
+
+R 
+
+# library 
+library(ggplot2)
+library(tidyverse)
+
+# input 
+df <- read.table("Correlation_segments_260130.txt", header = TRUE, sep=" ")
+
+# Mean correlation per pid 
+heatmap_data <- df %>%
+  group_by(PID1, PID2) %>%
+  summarise(mean_corr = mean(Correlation, na.rm = TRUE), .groups = 'drop')
+
+heatmap_data <- subset(heatmap_data, PID1!="CaIS_AB" & PID2!="CaIS_AB")
+
+# plot
+pdf.name <- paste0("Segments_correlation.heatmap_260130.pdf")
+pdf( file=pdf.name, width =13, height = 13, colormodel="cmyk")
+breaks_val <- c(0, 0.5, 0.6, 0.7, max(heatmap_data$mean_corr))
+
+plt <- ggplot(heatmap_data, aes(x = PID1, y = PID2, fill = mean_corr)) +
+  geom_tile(color = "white") + geom_text(aes(label=round(mean_corr,2))) + 
+    scale_fill_gradient2(low = "white", high = "red", mid = "gold", 
+                       midpoint = 0.2, limit = c(0, max(heatmap_data$mean_corr)), name="Mean\nCorrelation") +
+  theme_minimal() + 
+  labs(title = "Correlation between segments",
+       x = "",
+       y = "") +
+  theme(plot.title = element_text(hjust = 0.5, size = 20, face = "bold"),
+            axis.title.x = element_text(size = 15, face="bold"),
+            axis.title.y = element_text(size = 15, face="bold"),
+            axis.text = element_text(size = 15, face="bold", color="black"),
+            axis.text.x = element_text(angle=90, hjust=1.0)) + 
+  coord_fixed()
+
+print(plt)
+
+dev.off()
