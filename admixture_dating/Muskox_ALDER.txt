@@ -1,0 +1,464 @@
+#################################
+##### 1. Alder (jacknifing) #####
+#################################
+
+cd /home/projects1/UmingmakMuskox/analysis/Alder
+mkdir -p Alder_260220; cd Alder_260220
+mkdir -p parfile; mkdir -p log
+
+pt1=($(pwd)"/")
+fn1="/home/projects1/UmingmakMuskox/analysis/admixfrog/admixfrog_250821/Muskox.admixfrog.260115"
+fn2=${pt1}"Muskox.260130.rename"
+listf=${pt1}"Muskox_island_ind_260130.txt"
+of1=${pt1}"parfile/Muskox_alder_260130"
+lst1=${pt1}"Muskox_island_list_260130.txt"
+scf1=${pt1}"ALDER_260130.sh"
+scf2="/home/donghee_kim/script/alder_jackknife_output_trim_151028.py"
+scf3="/home/donghee_kim/script/exponential_fit_functions_151030.R"
+
+
+# Make a recipient list (Island)
+echo "CaIN CaIS" |sed s/" "/"\n"/g > ${lst1}
+
+# Make a grouplist
+awk '{ if ($3~/CaM/) print $3,"CaM"; else if ($3~/Gr/) print $3,"Gr"; else if ($3!~/BGM/ && $3!~/GRL/ && $3~/CaIN/) print $3,"CaIN" ; else if ($3!~/BGM/ && $3!~/GRL/ && $3~/CaIS/ && $3!="CaIS_AB") print $3,"CaIS" }' ${fn1}.ind > temp1
+
+## Make a ind list for alder 
+while read -r iid sex pid; do
+    npid=($(awk -v pid="$pid" 'BEGIN {pid2=pid} {if ($1==pid) pid2=$2} END {print pid2}' temp1))
+    echo -e ${iid}"\t"${sex}"\t"${npid} >> ${fn2}.ind
+done < ${fn1}.ind
+
+## Create a parameter file to run ALDER 
+refpop1s="CaM"
+refpop2s="Gr"
+
+while read adpop ; do
+    for refpop1 in ${refpop1s}; do for refpop2 in ${refpop2s}; do 
+        echo "genotypename: "${fn1}".geno" > ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "snpname: "${fn1}".snp" >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "indivname: "${fn2}".ind" >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "admixpop: "${adpop} >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "refpops: "${refpop1}";"${refpop2} >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "checkmap: NO" >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "num_threads: 4" >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "mindis: 0.001" >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "mincount: 2" >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "jackknife: YES" >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "raw_outname: ${pt1}log/${adpop}_${refpop1}_${refpop2}.raw.txt" >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+    done ; done 
+done < ${lst1}
+
+## run ALDER
+idnmax=($(wc -l ${lst1}))
+nperrun=2
+
+for refpop1 in ${refpop1s}; do for refpop2 in ${refpop2s}; do 
+    sbatch --array=1-${idnmax}%${nperrun}  -c 4 --mem 7500 --wrap=${scf1}" "${refpop1}" "${refpop2}" "${lst1}
+done ; done 
+
+## reformat raw txt file 
+## Summarize weighted LD tables into a single file
+nchr=23
+while read adpop ; do
+    for refpop1 in ${refpop1s}; do for refpop2 in ${refpop2s}; do 
+        of1=${pt1}"log/"${adpop}"_"${refpop1}"_"${refpop2}
+        ${scf2} ${of1}.raw.txt ${nchr} ${of1}.LD.txt
+        #rm ${of1}.raw.txt*
+    done ; done 
+done < ${lst1}
+
+
+
+################### Saving the following script as "ALDER_260130.sh" #################
+
+#!/bin/bash
+
+J=$SLURM_ARRAY_TASK_ID
+
+refpop1=$1
+refpop2=$2
+listf=$3
+
+adpop=($(awk -v J=$J '{ if (NR==J) print $1}' ${listf}))
+
+/home/donghee_kim/apps/alder/alder -p ./parfile/${adpop}_${refpop1}_${refpop2}.par > ./log/${adpop}_${refpop1}_${refpop2}.log
+
+##########################################################################
+## Save the following script as "alder_jackknife_output_trim_151028.py" ##
+
+#! /usr/bin/env python
+import re, sys, os, gzip
+import numpy as np
+from operator import itemgetter
+arg = sys.argv
+
+def column(mat, i):
+    return [row[i] for row in mat]
+
+r1 = os.getcwd() + "/"; os.chdir(r1)
+
+inFile = arg[1]
+nchr = int(arg[2])
+outFile = arg[3]
+
+contigs = ["all"]; contigs.extend(["chr" + str(i) for i in range(1,nchr+1)])
+fnames = [inFile]
+fnames.extend([inFile + "-" + str(i) for i in range(1,nchr+1)])
+
+
+F1 = open(outFile, "w")
+F1.writelines("contig\tdist.cM\tweighted.LD\tbin.count\tbin.status\n")
+
+for i,contig in enumerate(contigs):
+    for line in open(fnames[i], "r").readlines()[1:]:
+        if line[0] == "#":
+            bin_status = "in.LD"
+        else:
+            bin_status = "used"
+        ts = re.sub("#", "", line.strip()).split()
+        F1.writelines(contig + "\t" + '\t'.join(ts) + "\t" + bin_status + "\n")
+        if ts[0] == "inf":
+            break
+
+F1.close()
+os.system("gzip " + outFile)
+
+##########################################################
+
+R
+
+rm(list=ls())
+
+source("/home/donghee_kim/script/exponential_fit_functions_151030.R")
+
+nchr=23
+contigs = c("all", paste("chr", 1:nchr, sep=""))
+
+prefix = "./log/CaIN_CaM_Gr"
+fn1 = paste0(prefix,".LD.txt.gz")  ## LD table file
+of1 = paste0(prefix,"_260220")
+
+td1 = read.table(gzfile(fn1), header=T)  ## Import LD table file
+
+## Split LD table file into each run (main run + nchr jackknife runs)
+d1 = list()
+for (i in 1:length(contigs)) {
+  contig.vec = as.vector(td1$contig)
+  for (j in 1:length(contigs)) d1[[j]] = td1[contig.vec == contigs[j],]
+}
+
+for (mindis in c(0.1,0.5)){ 
+    df_single <- single_pulse_wrap(d1,mindis)
+    df_double <- two_pulse_wrap(d1,mindis)
+    df_triple <- three_pulse_wrap(d1,mindis)
+
+    result_table <- data.frame(
+    Model = c("Single","Double_1", "Double_2","Triple_1", "Triple_2", "Triple_3"),
+    Amp = c(df_single$est[1],df_double$est[1],df_double$est[5],df_triple$est[1],df_triple$est[5],df_triple$est[9]),
+    Amp_SD = c(df_single$est[2],df_double$est[2],df_double$est[6],df_triple$est[2],df_triple$est[6],df_triple$est[10]),
+    Decay = c(df_single$est[3],df_double$est[3],df_double$est[7],df_triple$est[3],df_triple$est[7],df_triple$est[11]),
+    Decay_SD = c(df_single$est[4],df_double$est[4],df_double$est[8],df_triple$est[4],df_triple$est[8],df_triple$est[12])
+    )
+    write.table(result_table,file = paste0(of1, ",_mindis",mindis,"_estimates.txt"),sep = "\t",quote = FALSE,row.names = FALSE)
+}
+
+pdf(paste0(of1,".pdf"), height=8, width=8, colormodel="cmyk")
+    par(mar=c(5.1, 4.6, 2.1, 2.1))
+    plot_single_pulse(d1, min.dist=0.1, max.dist=20)
+    plot_two_pulse(d1, min.dist=0.1, max.dist=20)
+    plot_three_pulse(d1, min.dist=0.1, max.dist=20)
+    plot_single_pulse(d1, min.dist=0.5, max.dist=20)
+    plot_two_pulse(d1, min.dist=0.5, max.dist=20)
+    plot_three_pulse(d1, min.dist=0.5, max.dist=20)
+dev.off()
+
+
+##########################################################################
+################### exponential_fit_functions_151030.R ######################### 
+
+## A function to do a single-pulse exponential fit
+single_pulse = function(dmat, mindist) {
+  dist.vec = as.vector(dmat$dist.cM)
+  ld.vec = as.vector(dmat$weighted.LD)
+  fil.vec = (dist.vec >= mindist) & (dist.vec < Inf)
+  affine.term = ld.vec[length(ld.vec)]
+
+  dist.vec.2 = dist.vec[fil.vec]; ld.vec.2 = ld.vec[fil.vec]
+  model.dat = nls(ld.vec.2 ~ exp(a -0.01 * b * dist.vec.2) + affine.term, start = list(a=-10, b=10), control=list(maxiter=5000))
+  return(model.dat)
+}
+
+
+## Single-pulse fitting wrap-up script for jackknifing
+single_pulse_wrap = function(dlist, mindist) {
+  tms = list(); tm.amp = c(); tm.decay = c()
+  n.contig = length(dlist)
+  for (i in 1:n.contig) {
+    tms[[i]] = single_pulse(dlist[[i]], mindist)
+    tm.amp = c(tm.amp, exp(summary(tms[[i]])$coefficient[1,1]))
+    tm.decay = c(tm.decay, summary(tms[[i]])$coefficient[2,1])
+  }
+  tm.amp.sd = sqrt(sum((tm.amp[2:n.contig] - tm.amp[1])**2) * (n.contig-2)/(n.contig-1))
+  tm.decay.sd = sqrt(sum((tm.decay[2:n.contig] - tm.decay[1])**2) * (n.contig-2)/(n.contig-1))
+  tout = list()
+  tout[[1]] = tms; tout[[2]] = tm.amp; tout[[3]] = tm.decay
+  tout[[4]] = c(tm.amp[1], tm.amp.sd, tm.decay[1], tm.decay.sd)
+  names(tout) = c("model", "amp", "decay", "est")
+  return(tout)
+}
+
+## A function to do a double-pulse exponential fit
+two_pulse = function(dmat, mindist) {
+  dist.vec = as.vector(dmat$dist.cM)
+  ld.vec = as.vector(dmat$weighted.LD)
+  fil.vec = (dist.vec >= mindist) & (dist.vec < Inf)
+  affine.term = ld.vec[length(ld.vec)]
+
+  dist.vec.2 = dist.vec[fil.vec]; ld.vec.2 = ld.vec[fil.vec]
+  model.dat = nls(ld.vec.2 ~ exp(a -0.01 * b * dist.vec.2) + exp(c -0.01 * d * dist.vec.2) + affine.term, start = list(a=-10, b=10, c=-10, d=100), control=list(maxiter=5000))
+  return(model.dat)
+}
+
+## Single-pulse fitting wrap-up script for jackknifing
+two_pulse_wrap = function(dlist, mindist) {
+  tms = list(); tm.amp1 = c(); tm.decay1 = c(); tm.amp2 = c(); tm.decay2 = c()
+  n.contig = length(dlist)
+  for (i in 1:n.contig) {
+    tms[[i]] = two_pulse(dlist[[i]], mindist)
+    tm.amp1 = c(tm.amp1, exp(summary(tms[[i]])$coefficient[1,1]))
+    tm.decay1 = c(tm.decay1, summary(tms[[i]])$coefficient[2,1])
+    tm.amp2 = c(tm.amp2, exp(summary(tms[[i]])$coefficient[3,1]))
+    tm.decay2 = c(tm.decay2, summary(tms[[i]])$coefficient[4,1])
+  }
+  tm.amp1.sd = sqrt(sum((tm.amp1[2:n.contig] - tm.amp1[1])**2) * (n.contig-2)/(n.contig-1))
+  tm.decay1.sd = sqrt(sum((tm.decay1[2:n.contig] - tm.decay1[1])**2) * (n.contig-2)/(n.contig-1))
+  tm.amp2.sd = sqrt(sum((tm.amp2[2:n.contig] - tm.amp2[1])**2) * (n.contig-2)/(n.contig-1))
+  tm.decay2.sd = sqrt(sum((tm.decay2[2:n.contig] - tm.decay2[1])**2) * (n.contig-2)/(n.contig-1))
+  tout = list()
+  tout[[1]] = tms; tout[[2]] = tm.amp1; tout[[3]] = tm.decay1; tout[[4]] = tm.amp2; tout[[5]] = tm.decay2
+  tout[[6]] = c(tm.amp1[1], tm.amp1.sd, tm.decay1[1], tm.decay1.sd)
+  tout[[6]] = c(tout[[6]], tm.amp2[1], tm.amp2.sd, tm.decay2[1], tm.decay2.sd)
+  names(tout) = c("model", "amp1", "decay1", "amp2", "decay2", "est")
+  return(tout)
+}
+
+## A function for single-pulse plotting
+plot_single_pulse = function(dlist, min.dist, max.dist) {
+  dmat = dlist[[1]]
+  dist.vec = as.vector(dmat$dist.cM)
+  filvec = (dist.vec >= min.dist & dist.vec <= max.dist)
+
+  y1 = min(dmat$weighted.LD[filvec]); y2 = max(dmat$weighted.LD[filvec])
+  y.interval = 0.5*10**(-1*ceiling(log10(1/y2)))
+  ymin = min(c(0,floor(y1/y.interval) * y.interval))
+  ymax = ceiling(y2/y.interval) * y.interval
+  yticks = seq(ymin, ymax, y.interval)
+
+  par(mar=c(5.1, 5.1, 2.1, 2.1)); par(cex.axis=1.3, cex.lab=1.3)
+  xlabvec = "Distance (cM)"
+  ylabvec = expression(paste("Weighted LD (x 10"^-4, ")"))
+  plot(dmat$dist.cM[filvec], dmat$weighted.LD[filvec], xlim=c(0,max.dist), ylim=c(ymin,ymax), xlab=xlabvec, ylab="", yaxt="n", pch=4, col="skyblue")
+  axis(2, at=yticks, label=yticks*10**4, las=2, cex.axis=1.1)
+  mtext(2, text=ylabvec, line=3.5, cex=1.3)
+
+  dv = as.vector(dmat$dist.cM)
+  dv2 = dv[dv >= min.dist & dv < Inf]
+  m1 = single_pulse_wrap(dlist, mindist=min.dist)
+  lines(dv2, predict(m1$model[[1]], list(x=dv2)), col="red", lwd=3)
+  l1 = round(m1$est[3], digits=2); l1.sd = round(m1$est[4], digits=2)
+  lg1 = paste("1 pulse (", l1, " \u00b1 ", l1.sd, "); dist=", min.dist, " cM", sep="")
+  legend("topright", legend=lg1, lty=1, lwd=2, col="red", cex=1.3, y.intersp=1.3)
+}
+
+## A function for two-pulse plotting
+plot_two_pulse = function(dlist, min.dist, max.dist) {
+  dmat = dlist[[1]]
+  dist.vec = as.vector(dmat$dist.cM)
+  filvec = (dist.vec >= min.dist & dist.vec <= max.dist)
+
+  y1 = min(dmat$weighted.LD[filvec]); y2 = max(dmat$weighted.LD[filvec])
+  y.interval = 0.5*10**(-1*ceiling(log10(1/y2)))
+  ymin = min(c(0,floor(y1/y.interval) * y.interval))
+  ymax = ceiling(y2/y.interval) * y.interval
+  yticks = seq(ymin, ymax, y.interval)
+
+  par(mar=c(5.1, 5.1, 2.1, 2.1)); par(cex.axis=1.3, cex.lab=1.3)
+  xlabvec = "Distance (cM)"
+  ylabvec = expression(paste("Weighted LD (x 10"^-4, ")"))
+  plot(dmat$dist.cM[filvec], dmat$weighted.LD[filvec], xlim=c(0,max.dist), ylim=c(ymin,ymax), xlab=xlabvec, ylab="", yaxt="n", pch=4, col="skyblue")
+  axis(2, at=yticks, label=yticks*10**4, las=2, cex.axis=1.1)
+  mtext(2, text=ylabvec, line=3.5, cex=1.3)
+
+  dv = as.vector(dmat$dist.cM)
+  dv2 = dv[dv >= min.dist & dv < Inf]
+  m1 = single_pulse_wrap(dlist, mindist=min.dist)
+  m2 = two_pulse_wrap(dlist, mindist=min.dist)
+  lines(dv2, predict(m1$model[[1]], list(x=dv2)), col="red", lwd=3)
+  lines(dv2, predict(m2$model[[1]], list(x=dv2)), col="orange", lwd=3)
+  l1 = round(m1$est[3], digits=2); l1.sd = round(m1$est[4], digits=2)
+  l2 = round(m2$est[3], digits=2); l2.sd = round(m2$est[4], digits=2)
+  l3 = round(m2$est[7], digits=2); l3.sd = round(m2$est[8], digits=2)
+  lg1 = paste("1 pulse (", l1, " \u00b1 ", l1.sd, ")", sep="")
+  lg2 = paste("2 pulses (", l2, " \u00b1 ", l2.sd, "; ", l3, " \u00b1 ", l3.sd, ")", sep="")
+  legend("topright", legend=c(lg1, lg2), lty=1, lwd=2, col=c("red","orange"), cex=1.3, y.intersp=1.2)
+}
+
+
+## A function to do a three-pulse exponential fit
+## Safe exp to avoid overflow/underflow in nls
+safeexp <- function(z) exp(pmax(pmin(z, 700), -700))
+
+three_pulse = function(dmat, mindist) {
+  dist.vec = as.vector(dmat$dist.cM)
+  ld.vec   = as.vector(dmat$weighted.LD)
+
+  ok = is.finite(dist.vec) & is.finite(ld.vec) & (dist.vec >= mindist)
+  x  = dist.vec[ok]
+  ld = ld.vec[ok]
+  if (length(ld) < 12) stop("Too few points for three-pulse")
+
+  affine.term = tail(ld.vec[is.finite(ld.vec)], 1)
+  if (!is.finite(affine.term)) stop("Bad affine.term")
+
+  dat = data.frame(x=x, ld=ld)
+
+  ## Warm start from 2-pulse (works if your two_pulse runs)
+  m2  = two_pulse(dmat, mindist)
+  cf2 = coef(m2)
+
+  ## Build several starting sets (because 3-pulse is sensitive)
+  starts = list(
+    list(a=cf2["a"], b=max(cf2["b"], 1e-3),
+         c=cf2["c"], d=max(cf2["d"], 1e-3),
+         e=min(cf2[c("a","c")]) - 5,
+         f=max(cf2[c("b","d")]) * 3),
+
+    list(a=cf2["a"], b=max(cf2["b"], 1e-3),
+         c=min(cf2["a"], cf2["c"]) - 3, d=max(cf2[c("b","d")]) * 2,
+         e=min(cf2["a"], cf2["c"]) - 8, f=max(cf2[c("b","d")]) * 6),
+
+    list(a=-12, b=5, c=-12, d=50, e=-14, f=200)
+  )
+
+  ## Bounds: enforce positive decays, and keep decays from going crazy
+  lower = c(a=-Inf, b=1e-6, c=-Inf, d=1e-6, e=-Inf, f=1e-6)
+  upper = c(a= Inf, b=1e5,  c= Inf, d=1e5,  e= Inf, f=1e5)
+
+  last_err = NULL
+  for (st in starts) {
+    fit = tryCatch(
+      nls(
+        ld ~ safeexp(a - 0.01*b*x) +
+             safeexp(c - 0.01*d*x) +
+             safeexp(e - 0.01*f*x) + affine.term,
+        data = dat,
+        start = st,
+        algorithm = "port",
+        lower = lower,
+        upper = upper,
+        control = nls.control(maxiter=5000, warnOnly=TRUE)
+      ),
+      error = function(e) { last_err <<- e; NULL }
+    )
+    if (!is.null(fit)) return(fit)
+  }
+
+  stop(last_err)
+}
+
+
+## Three-pulse fitting wrap-up script for jackknifing
+three_pulse_wrap = function(dlist, mindist) {
+  tms = list()
+  tm.amp1 = c(); tm.decay1 = c()
+  tm.amp2 = c(); tm.decay2 = c()
+  tm.amp3 = c(); tm.decay3 = c()
+
+  n.contig = length(dlist)
+  for (i in 1:n.contig) {
+    tms[[i]] = three_pulse(dlist[[i]], mindist)
+
+    tm.amp1 = c(tm.amp1, exp(summary(tms[[i]])$coefficient[1,1]))
+    tm.decay1 = c(tm.decay1, summary(tms[[i]])$coefficient[2,1])
+
+    tm.amp2 = c(tm.amp2, exp(summary(tms[[i]])$coefficient[3,1]))
+    tm.decay2 = c(tm.decay2, summary(tms[[i]])$coefficient[4,1])
+
+    tm.amp3 = c(tm.amp3, exp(summary(tms[[i]])$coefficient[5,1]))
+    tm.decay3 = c(tm.decay3, summary(tms[[i]])$coefficient[6,1])
+  }
+
+  tm.amp1.sd = sqrt(sum((tm.amp1[2:n.contig] - tm.amp1[1])**2) * (n.contig-2)/(n.contig-1))
+  tm.decay1.sd = sqrt(sum((tm.decay1[2:n.contig] - tm.decay1[1])**2) * (n.contig-2)/(n.contig-1))
+
+  tm.amp2.sd = sqrt(sum((tm.amp2[2:n.contig] - tm.amp2[1])**2) * (n.contig-2)/(n.contig-1))
+  tm.decay2.sd = sqrt(sum((tm.decay2[2:n.contig] - tm.decay2[1])**2) * (n.contig-2)/(n.contig-1))
+
+  tm.amp3.sd = sqrt(sum((tm.amp3[2:n.contig] - tm.amp3[1])**2) * (n.contig-2)/(n.contig-1))
+  tm.decay3.sd = sqrt(sum((tm.decay3[2:n.contig] - tm.decay3[1])**2) * (n.contig-2)/(n.contig-1))
+
+  tout = list()
+  tout[[1]] = tms
+  tout[[2]] = tm.amp1; tout[[3]] = tm.decay1
+  tout[[4]] = tm.amp2; tout[[5]] = tm.decay2
+  tout[[6]] = tm.amp3; tout[[7]] = tm.decay3
+
+  tout[[8]] = c(tm.amp1[1], tm.amp1.sd, tm.decay1[1], tm.decay1.sd)
+  tout[[8]] = c(tout[[8]], tm.amp2[1], tm.amp2.sd, tm.decay2[1], tm.decay2.sd)
+  tout[[8]] = c(tout[[8]], tm.amp3[1], tm.amp3.sd, tm.decay3[1], tm.decay3.sd)
+
+  names(tout) = c("model", "amp1", "decay1", "amp2", "decay2", "amp3", "decay3", "est")
+  return(tout)
+}
+
+## A function for three-pulse plotting
+plot_three_pulse = function(dlist, min.dist, max.dist) {
+  dmat = dlist[[1]]
+  dist.vec = as.vector(dmat$dist.cM)
+  filvec = (dist.vec >= min.dist & dist.vec <= max.dist)
+
+  y1 = min(dmat$weighted.LD[filvec]); y2 = max(dmat$weighted.LD[filvec])
+  y.interval = 0.5*10**(-1*ceiling(log10(1/y2)))
+  ymin = min(c(0,floor(y1/y.interval) * y.interval))
+  ymax = ceiling(y2/y.interval) * y.interval
+  yticks = seq(ymin, ymax, y.interval)
+
+  par(mar=c(5.1, 5.1, 2.1, 2.1)); par(cex.axis=1.3, cex.lab=1.3)
+  xlabvec = "Distance (cM)"
+  ylabvec = expression(paste("Weighted LD (x 10"^-4, ")"))
+  plot(dmat$dist.cM[filvec], dmat$weighted.LD[filvec],
+       xlim=c(0,max.dist), ylim=c(y1,y2),
+       xlab=xlabvec, ylab="", yaxt="n", pch=4, col="skyblue")
+  axis(2, at=yticks, label=yticks*10**4, las=2, cex.axis=1.1)
+  mtext(2, text=ylabvec, line=3.5, cex=1.3)
+
+  dv = as.vector(dmat$dist.cM)
+  dv2 = dv[dv >= min.dist & dv < Inf]
+
+  m1 = single_pulse_wrap(dlist, mindist=min.dist)
+  m2 = two_pulse_wrap(dlist, mindist=min.dist)
+  m3 = three_pulse_wrap(dlist, mindist=min.dist)
+
+  lines(dv2, predict(m1$model[[1]], list(x=dv2)), col="red", lwd=3)
+  lines(dv2, predict(m2$model[[1]], list(x=dv2)), col="orange", lwd=3)
+  lines(dv2, predict(m3$model[[1]], list(x=dv2)), col="purple", lwd=3)
+
+  l1 = round(m1$est[3], digits=2); l1.sd = round(m1$est[4], digits=2)
+
+  l2a = round(m2$est[3], digits=2);  l2a.sd = round(m2$est[4], digits=2)
+  l2b = round(m2$est[7], digits=2);  l2b.sd = round(m2$est[8], digits=2)
+
+  l3a = round(m3$est[3], digits=2);  l3a.sd = round(m3$est[4], digits=2)
+  l3b = round(m3$est[7], digits=2);  l3b.sd = round(m3$est[8], digits=2)
+  l3c = round(m3$est[11], digits=2); l3c.sd = round(m3$est[12], digits=2)
+
+  lg1 = paste("1 pulse (", l1, " \u00b1 ", l1.sd, ")", sep="")
+  lg2 = paste("2 pulses (", l2a, " \u00b1 ", l2a.sd, "; ", l2b, " \u00b1 ", l2b.sd, ")", sep="")
+  lg3 = paste("3 pulses (", l3a, " \u00b1 ", l3a.sd, "; ", l3b, " \u00b1 ", l3b.sd, "; ", l3c, " \u00b1 ", l3c.sd, ")", sep="")
+
+  legend("topright", legend=c(lg1, lg2, lg3),
+         lty=1, lwd=2, col=c("red","orange","purple"),
+         cex=1.2, y.intersp=1.2)
+}
+

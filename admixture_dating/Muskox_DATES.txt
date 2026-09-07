@@ -1,0 +1,104 @@
+###############################################################
+#### 1. Dating admixture using DATES ####
+###############################################################
+
+cd /home/projects1/UmingmakMuskox/analysis/Alder
+mkdir -p DATES_260220; cd DATES_260220
+
+pt1=($(pwd)"/")
+fn1="/home/projects1/UmingmakMuskox/analysis/admixfrog/admixfrog_250821/Muskox.admixfrog.260115"
+fn2=${pt1}"Muskox.260130.rename"
+listf=${pt1}"Muskox_island_ind_260130.txt"
+of1=${pt1}"parfile/Muskox_alder_260130"
+lst1=${pt1}"Muskox_island_list_260130.txt"
+
+# Make a recipient list (CaIS_AB)
+echo "CaIS_AB" |sed s/" "/"\n"/g > ${lst1}
+
+# Make a grouplist
+awk '{ if ($3~/CaM/) print $3,"CaM"; else if ($3~/Gr/) print $3,"Gr" }' ${fn1}.ind > temp1
+
+## Make a ind list for alder 
+while read -r iid sex pid; do
+    npid=($(awk -v pid="$pid" 'BEGIN {pid2=pid} {if ($1==pid) pid2=$2} END {print pid2}' temp1))
+    echo -e ${iid}"\t"${sex}"\t"${npid} >> ${fn2}.ind
+done < ${fn1}.ind
+
+## Write an admixture combination list
+ref1s="CaM"
+ref2s="Gr"
+
+for tar in CaIS_AB; do 
+    mkdir -p ${tar}
+    of1=${pt1}${tar}"/"${tar}
+    adm1=${of1}"_admixlist.txt"
+    parf=${of1}".par"
+
+    if [ -f "$adm1" ]; then rm ${adm1}; fi 
+
+    for r1 in ${ref1s}; do for r2 in ${ref2s}; do
+        echo -e ${r1}"\t"${r2}"\t"${tar}"\t"${tar}"/"${tar}"."${r1}"_"${r2} >> ${adm1}
+    done; done
+
+    ## Write a template for DATES parameter files
+    echo 'genotypename: '${fn1}'.geno' > ${parf}
+    echo 'snpname: '${fn1}'.snp' >> ${parf}
+    echo 'indivname: '${fn2}'.ind' >> ${parf}
+    echo 'jackknife: YES' >> ${parf}
+    echo 'binsize: 0.001' >> ${parf}
+    echo 'mindis: 0.001' >> ${parf}
+    echo 'maxdis: 0.5' >> ${parf}
+    echo 'seed: 77' >> ${parf}
+    echo 'minparentcount: 1' >> ${parf}
+    echo 'qbin: 10' >> ${parf}
+    echo 'runfit: YES' >> ${parf}
+    echo 'afffit: YES' >> ${parf}
+    echo 'lovalfit: 0.45' >> ${parf}
+    echo 'numchrom: 26' >> ${parf}
+    echo 'checkmap: NO' >> ${parf}
+
+    ## Write admixlist file at the bottom of the parameter file
+    echo 'admixlist: '${adm1} >> ${parf}
+
+    CMD="/home/donghee_kim/apps/DATES_v4010/dates -p "${parf}" > "${of1}".log"
+
+    sbatch -c 8 --mem 15000 --wrap="$CMD"
+done 
+
+
+
+
+############### save the following script as "~/script/Plotting_DATES.R" #################
+
+#!/home/donghee_kim/.conda/envs/Admixtools/bin/Rscript
+
+library(stringr)
+args = commandArgs(trailingOnly=TRUE)
+
+## read input file
+fn1 <- args[1]
+target <- args[2]
+sc1 <- args[3]
+sc2 <- args[4]
+of1 <- paste0(fn1,'.dates')
+
+df <- read.table(paste0(fn1,".fit"), col.name=c('d' , 'wLD', 'fit' , 'wLD-fit' ))
+dates <- read.table(paste0(fn1,".jout"), header=F)
+params <- read.delim(paste0(fn1,"_expfit.log"), header=F)
+
+df <- df[-nrow(df),] # remove last line
+yv <- df$wLD
+xv <- df$d
+
+m = dates$V2[1]
+se = dates$V5[1]
+A = as.numeric(strsplit(str_squish(params$V1[11]), " ")[[1]][1])
+B = as.numeric(strsplit(str_squish(params$V1[11]), " ")[[1]][2])
+prdv =  A* exp(-.01 * m * xv) + B
+
+pdf(paste0(of1,".pdf"),width=5,height=6)
+plot(xv, yv, xlim=c(0,50), xlab = "Genetic distance (cM)", ylab = "Weighted Ancestry Covariance", pch=16, col='black',main="")
+lines(xv, prdv, col="red", lwd=3)
+legend("topright",legend=paste0("Inferred date: ",m," ± ",se," gens"),border="white",cex=1)
+title(paste0(target," =\n ",sc1," + ",sc2))
+dev.off()
