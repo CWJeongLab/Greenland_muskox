@@ -1,2 +1,2 @@
 # Greenland_muskox
-This is a repository for codes used in the modern Greenland muskox genomes paper (2026). 
+This repository contains the code used in the paper on modern Greenland muskox genomes (2026).
