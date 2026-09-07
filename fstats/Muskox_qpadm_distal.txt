@@ -1,0 +1,120 @@
+#####################################################
+#### 1. qpAdm ######
+#####################################################
+
+cd /data2/projects1/Muskox/analysis/Fstatistics/
+mkdir -p qpAdm_260203; cd qpAdm_260203
+
+pt1=($(pwd)"/")
+fn1="/home/projects1/UmingmakMuskox/analysis/admixfrog/admixfrog_250821/Muskox.admixfrog.260115"
+lst1=${pt1}"Island_greenland_list.txt"
+scf1="/home/donghee_kim/script/qpAdm_per_group.R"
+scf2="/home/donghee_kim/script/qpAdm_array.sh"
+listf=${pt1}"qpAdm_array_list.txt"
+
+## Target groups (island & greenland)
+grep -e "CaI" -e "Gr" ${fn1}.ind |grep -v -e "BGM" -e "GRL" -e "GrES" | cut -f3|sort|uniq > ${lst1}
+
+while read pop; do mkdir -p ${pop} ;done < ${lst1}
+
+while read pop; do awk -v pop=${pop} '{if ($3==pop) sum+=1}END{print pop, sum}' ${fn1}.ind >> list_indnum.txt ; done < ${lst1}
+
+
+## Define sets of outgroups you would like to test
+og1s="Tak SibE_WI CaME_BL"
+og2s=${og1s}" CaMW_KU1"
+og3s=${og1s}" CaIS_BI"
+og4s=${og1s}" CaIN_GF"
+og5s=${og1s}" GrN_MS"
+og6s=${og1s}" GrEN_ZA"
+
+## Write down sets of outgroups
+echo ${og1s} | sed s/" "/"\n"/g > OG1.pops 
+echo ${og2s} | sed s/" "/"\n"/g > OG2.pops 
+echo ${og3s} | sed s/" "/"\n"/g > OG3.pops 
+echo ${og4s} | sed s/" "/"\n"/g > OG4.pops 
+echo ${og5s} | sed s/" "/"\n"/g > OG5.pops 
+echo ${og6s} | sed s/" "/"\n"/g > OG6.pops 
+
+## Write down sets of references
+k=1
+for s1 in CaMW_KU1 CaIS_BI CaIN_GF; do 
+  for s2 in GrES_HD GrEN_ZA; do 
+    echo ${s1} ${s2} | sed s/" "/"\n"/g > REF${k}.pops
+    let k+=1
+  done 
+done 
+
+## run qpAdm
+if [[ -f "$listf" ]]; then rm ${listf}; fi 
+for right in OG*.pops; do
+    for left in REF*.pops; do
+        echo ${left} ${right} >> ${listf}
+    done
+done 
+
+maxm=13000
+CMD=${scf2}" "${fn1}" "${lst1}" "${listf}" "${maxm}
+
+idnmax=($(wc -l ${listf}))
+nperrun=8
+
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 15000 --wrap="$CMD"
+
+####################################################
+## Extract qpAdm results into a single table     ##
+## Run this after finishing qpAdm job runs above  ##
+###############################################
+
+cd /data2/projects1/Muskox/analysis/Fstatistics/qpAdm_260203
+
+pt1=($(pwd)"/")
+lst1=${pt1}"Island_greenland_list.txt"
+
+## Target groups
+targets=""
+while read pop; do
+    targets+=${pop}" "
+done < ${lst1}
+
+of1="Muskox.qpAdm.summary.260203.txt"
+
+onum=($(ls OG*.pops | wc -l))
+rnum=($(ls REF*.pops | wc -l))
+
+paste OG* > outgroup.txt 
+
+#####################################
+## Extract qpAdm key summary data  ##
+
+hv="Target OG nRef Refs P-value SSE Coeff1 Coeff2 Coeff3 Coeff4 SE1 SE2 SE3 SE4"; echo ${hv} > ${of1}
+for P in ${targets}; do for K in $(seq 1 $onum); do for J in $(seq 1 ${rnum}); do 
+    refv=($(head -n 1 REF${J}.pops)) ; while read pop ; do refv+=";"${pop} ; done < <(tail -n +2 REF${J}.pops)
+    pnum=($(wc -l REF${J}.pops))
+    prefix="./"${P}"/"${P}".OG"${K}".REF"${J}
+    pd1=${prefix}".popdrop.tsv" ; rd1=${prefix}".rankdrop.tsv"
+    f4=${prefix}".f4.tsv" ; wg1=${prefix}".weights.tsv"
+
+    if [ ! -f "$pd1" ]; then continue; fi
+    nref=($(echo ${refv} | awk 'BEGIN {FS=";"} {print NF}'))
+    pval=($(head -n 2 ${rd1} | tail -1 | awk '{print $4}'))  ## qpAdm p-value
+    co1=($(head -n 2 ${wg1} | tail -1 | awk '{printf ("%.3f", $3)}' )) ; co2=($(head -n 3 ${wg1} | tail -1 | awk '{printf ("%.3f", $3)}' )) ## Coefficients
+    se1=($(head -n 2 ${wg1} | tail -1 | awk '{printf ("%.3f", $4)}' )) ; se2=($(head -n 3 ${wg1} | tail -1 | awk '{printf ("%.3f", $4)}' )) ## SEs
+    if [ "$pnum" == 4 ]; then 
+        co3=($(head -n 4 ${wg1} | tail -1 | awk '{printf ("%.3f", $3)}' )) ## Coefficients
+        se3=($(head -n 4 ${wg1} | tail -1 | awk '{printf ("%.3f", $4)}' ))
+        co4=($(head -n 5 ${wg1} | tail -1 | awk '{printf ("%.3f", $3)}' )) ## Coefficients
+        se4=($(head -n 5 ${wg1} | tail -1 | awk '{printf ("%.3f", $4)}' ))
+    elif [ "$pnum" == 3 ]; then 
+        co3=($(head -n 4 ${wg1} | tail -1 | awk '{printf ("%.3f", $3)}' )) ## Coefficients
+        se3=($(head -n 4 ${wg1} | tail -1 | awk '{printf ("%.3f", $4)}' ))
+        co4="NA"; se4="NA"
+    else 
+        co3="NA"; se3="NA"
+        co4="NA"; se4="NA"
+    fi 
+    SSEs=($(awk 'BEGIN {sse=0.0} {if ($2 ~ /fit/) sse+=$5*$5} END {print sse}' ${f4}))  ## sum of squared errors
+    echo ${P}" OG"${K}" "${J}" "${refv}" "${pval}" "${SSEs}" "${co1}" "${co2}" "${co3}" "${co4}" "${se1}" "${se2}" "${se3}" "${se4} >> ${of1}
+done; done; echo ${P}" is processed"; done
+
+
