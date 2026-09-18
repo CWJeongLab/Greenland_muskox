@@ -1,0 +1,458 @@
+#################################################################################
+## 1. Run AdapterRemoval and run BWA aln with collapsed reads (treated as SE). ##
+##    Otherwise, run BWA mem with unaligned reads (treated as PE).             ##
+##    Remove duplicates with each bam file and apply -q30 filter.              ##
+##    Merge separately mapped bam files into one.                              ##
+#################################################################################
+
+cd /data2/PubData/Pecnerova2023MolEcol/
+
+pt1=($(pwd)"/")
+scf0=${pt1}"Pecnerova2023_adapter_removal_script_250519.sh"
+scf1=${pt1}"Pecnerova2023_mapping_script_250520.sh"
+listf=${pt1}"Pecnerova2023_file_path_selected.txt"
+reff="/data2/projects1/Muskox/DataProcessing/Muskox_ref_list_250519.txt"
+
+## Run the jobs
+sbatch --array=1-110%6 -c 8 --mem 15000 -J adapter --wrap=${scf0}" "${listf}" "${reff}
+
+## Run the jobs
+sbatch --array=1-110%6 -c 8 --mem 15000 -J mapping --wrap=${scf1}" "${listf}" "${reff}
+
+
+## Check the amount of collapsed and truncated reads
+## n01 = the number of total read pairs
+## n02 = the number of full-length collapsed pairs
+## n03 = the number of truncated collapsed pairs
+## n04 = the number of singleton mate read pairs
+## n05 = the number of discarded mate read pairs
+## n06 = the number of truncated read pairs
+echo IID nr.all nr.collapsed nr.collapsed.truncated nr.singleton nr.discarded nr.pair.truncated pr.combined pr.pair.truncated > adapter_summary_new.txt
+for iid in $list; do
+    logf=($(ls ./${iid}/${iid}.L35.fq.settings))
+    n01=($(cat ${logf} | awk '{if ($0 ~ /^Total number of read pairs/) print $NF}'))
+    n02=($(cat ${logf} | awk '{if ($0 ~ /^Number of full-length collapsed pairs/) print $NF}'))
+    n03=($(cat ${logf} | awk '{if ($0 ~ /^Number of truncated collapsed pairs/) print $NF}'))
+    n04=($(cat ${logf} | awk '{if ($0 ~ /^Number of singleton mate 1 reads/) print $NF}'))
+    n05=($(cat ${logf} | awk '{if ($0 ~ /^Number of discarded mate 1 reads/) print $NF}'))
+    tnum1=($(cat ${logf} | awk '{if ($0 ~ /^Number of retained reads/) print $NF}'))
+    let tnum2=(${n02}+${n03}+${n04})
+    let n06=(${tnum1}-${n02}-${n03}-${n04})/2
+    echo ${iid} ${n01} ${n02} ${n03} ${n04} ${n05} ${n06} ${tnum2}| \
+        awk '{print $1, $2, $3, $4, $5, $6, $7, $8/$2, $7/$2}'
+done >> adapter_summary_new.txt
+
+
+
+
+
+############################################################################
+## Save the following as "Pecnerova2023_adapter_removal_script_250519.sh" ## 
+
+#!/bin/bash
+
+listf=$1   ## A list of samples to be processed (cn, iid, fq1)
+inum=$SLURM_ARRAY_TASK_ID
+
+pt1=($(pwd)"/")
+
+iid=($(awk -v inum="$inum" '{if (inum == $1) print $2}' ${listf}))   ## Individual/library ID
+fq1=($(awk -v inum="$inum" '{if (inum == $1) print $3}' ${listf}))   ## FastQ R1
+fq2=($(echo ${fq1} | sed s/"_1.fastq.gz"/"_2.fastq.gz"/g))
+
+## Create directories
+mkdir -p ./FastQ/${iid}/ ./newBAM/${iid}/ ./newVCF/${iid}/ ./qualimap/${iid}/ ./mapDamage/${iid}/
+
+
+#############################################################
+## Part 1. Run AdapterRemoval (keep 35 bp or longer reads) ##
+
+## Common options for AdapterRemoval; keep minlength 35 bps
+optstr="--gzip --threads 8 --trimns --trimqualities "
+optstr+="--adapter1 AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC "
+optstr+="--adapter2 AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGTA "
+optstr+="--minlength 35 --minquality 20 --minadapteroverlap 1"
+
+cd ${pt1}FastQ/${iid}/
+
+fqout=${iid}".L35.fq"
+
+## Run AdapterRemoval (PE)
+AdapterRemoval --file1 ${fq1} --file2 ${fq2} --basename ${fqout} ${optstr} --collapse
+zcat ${fqout}.collapsed.gz ${fqout}.collapsed.truncated.gz ${fqout}.singleton.truncated.gz \
+   | gzip > ${fqout}.combined.gz
+
+
+
+
+
+####################################################################
+## Save the following as "Pecnerova2023_mapping_script_250520.sh" ##
+
+#!/bin/bash
+
+listf=$1   ## A list of samples to be processed (cn, iid, fq1)
+reff=$2    ## the reference genome list file
+inum=$SLURM_ARRAY_TASK_ID
+
+pt1=($(pwd)"/")
+
+iid=($(awk -v inum="$inum" '{if (inum == $1) print $2}' ${listf}))   ## Individual/library ID
+
+type="non-UDG"
+seedval="32"; if [[ "$type" == "ssLib" ]] || [[ "$type" == "non-UDG" ]]; then seedval="9999"; fi
+
+fqout=${iid}".L35.fq"
+
+#####################################################################
+## Part 1. Map adapter-removed FastQ files to the reference genome ##
+
+cd ${pt1}newBAM/${iid}
+
+## Define read group
+RG="@RG\tID:"${iid}"\tSM:"${iid}"\tLB:"${iid}"\tPL:illumina"
+
+## Repeat data processing for each reference
+while read -r refn ref; do
+
+    ## Collapsed input FastQ (after running AdapterRemoval)
+    fqin0=${pt1}"FastQ/"${iid}"/"${fqout}".combined.gz"
+
+    ## Setup output BAM file prefix
+    of0=${iid}"."${refn}".SE.mapped"
+
+    ## Run BWA aln (-l 9999 for non-UDG, -l 32 for UDG-half)
+    bwa aln -t 8 -n 0.01 -l ${seedval} -f ${of0}.sai ${ref} ${fqin0}
+
+    ## Run BWA samse and filter out unmapped reads
+    bwa samse -r ${RG} ${ref} ${of0}.sai ${fqin0} | samtools view -h -F 0x0004 -o ${of0}.0.bam -
+
+    ## Sort the output file and index
+    samtools sort -@ 7 -m 512M ${of0}.0.bam -o ${of0}.bam
+    samtools index ${of0}.bam
+
+    ## Remove temporary files
+    rm ${of0}.0.bam
+    rm ${of0}.sai
+
+    ## Unaligned input FastQ (after running AdapterRemoval)
+    fqin1=${pt1}"FastQ/"${iid}"/"${fqout}".pair1.truncated.gz"
+    fqin2=${pt1}"FastQ/"${iid}"/"${fqout}".pair2.truncated.gz"
+
+    ## Setup output BAM file prefix
+    of1=${iid}"."${refn}".PE.mapped"
+
+    ## Run BWA mem and filter out unmapped reads and keep only properly paired reads (-f 0x0003)
+    /opt/ohpc/pub/apps/bwa-mem2/bwa-mem2 mem -t 8 -M -R ${RG} ${ref} ${fqin1} ${fqin2} | samtools view -bh -f 0x0003 -F 0x0004 -o ${of1}.1.bam -
+
+    ## Sort the output file and index
+    samtools sort -@ 7 -m 512M ${of1}.1.bam -o ${of1}.bam
+    samtools index ${of1}.bam
+
+    ## Remove temporary files
+    rm ${of1}.1.bam
+
+done < <(head -1 ${reff})
+
+
+#############################################################
+## Part 2. Remove duplicates and then apply -q30 filter    ##
+##         Try this with whole BAM with java memory option ##
+
+cd ${pt1}newBAM/${iid}
+
+dedup="/usr/bin/java -d64 -Xmx8192m "
+dedup+="-jar /opt/ohpc/pub/apps/dedup/0.12.8/DeDup-0.12.8.jar"
+
+picard="/usr/bin/java -Xmx8192m "
+picard+="-jar /opt/ohpc/pub/apps/picardtools/2.27.1/picard.jar MarkDuplicates"
+picardstr="REMOVE_DUPLICATES=true ASSUME_SORTED=true "
+picardstr+="MAX_FILE_HANDLES_FOR_READ_ENDS_MAP=1000 VALIDATION_STRINGENCY=LENIENT"
+
+## Process by read type
+read="SE PE"
+for type in ${read}; do
+    inbam=${iid}".Muskox."${type}".mapped"
+    of1=${inbam}".rmdup"
+    of2=${inbam}".rmdup.q30"
+
+    ## Remove duplicates
+    if [[ "$type" == "SE" ]]; then
+        ${dedup} -i ${inbam}.bam -m -o ./
+        mv ${inbam}_rmdup.bam ${of1}.bam
+        samtools index ${of1}.bam
+        rm ${inbam}.dedup.json
+    else
+        ${picard} INPUT=${inbam}.bam OUTPUT=${of1}.bam METRICS_FILE=${of1}.metric.txt ${picardstr} TMP_DIR=${pt1}/BAM/${iid}/ &> ${of1}.log1
+        samtools index ${of1}.bam
+    fi
+
+    ## Apply quality filter
+    samtools view -bh -q30 -o ${of2}.bam ${of1}.bam
+    samtools index ${of2}.bam
+
+done
+
+
+###################################################
+## Part 3. Merge the separately mapped BAM files ##
+
+cd ${pt1}newBAM/${iid}
+
+## Create a list of BAM files to be merged
+read="SE PE"
+ibams=""; for type in ${read}; do
+    ibam=($(realpath ${pt1}newBAM/${iid}/${iid}.Muskox.${type}.mapped.rmdup.q30.bam))
+    if [[ "$ibams" == "" ]]; then ibams+=${ibam}; else ibams+=" "${ibam}; fi
+done
+
+of0=${iid}".Muskox.mapped.rmdup.q30"
+
+## Merge the BAM files and sort the output file and index
+samtools merge -cp -@ 7 ${of1}.1.bam ${ibams}
+samtools sort -@ 7 -m 512M ${of1}.1.bam -o ${of0}.bam
+samtools index ${of0}.bam
+
+## Remove temporary files
+rm ${of1}.1.bam
+
+
+
+
+
+
+
+
+
+
+
+
+
+#################################################################################
+## 2. Run AdapterRemoval and run BWA mem with unaligned reads.                 ##
+##    Remove duplicates with each bam file and apply -q30 filter.              ##
+##    Merge separately mapped bam files into one.                              ##
+#################################################################################
+
+cd /data2/PubData/Pecnerova2023MolEcol/
+
+pt1=($(pwd)"/")
+scf0=${pt1}"Pecnerova2023_adapter_removal_script_231221.sh"
+scf1=${pt1}"Pecnerova2023_mapping_script_250803.sh"
+scf2=${pt1}"Pecnerova2023_merging_script_250803.sh"
+listf=${pt1}"Pecnerova2023_file_path_siberia.txt"
+reff="/data2/projects1/Muskox/DataProcessing/Muskox_ref_list_250519.txt"
+
+## Run the jobs
+sbatch --array=1-11 -c 8 --mem 15000 -J adapter --wrap=${scf0}" "${listf}" "${reff}
+
+## Run the jobs
+sbatch --array=1-11 -c 8 --mem 15000 -J Mapping --wrap=${scf1}" "${listf}" "${reff}
+
+## Run the jobs
+sbatch -c 8 --mem 15000 -J merging -p amd --wrap=${scf2}" "${listf}" "${reff}
+
+
+## Check the amount of collapsed and truncated reads
+## n01 = the number of total read pairs
+## n02 = the number of full-length collapsed pairs
+## n03 = the number of truncated collapsed pairs
+## n04 = the number of singleton mate read pairs
+## n05 = the number of discarded mate read pairs
+## n06 = the number of truncated read pairs
+cd /data2/PubData/Pecnerova2023MolEcol/FastQ/
+echo IID nr.all nr.collapsed nr.collapsed.truncated nr.singleton nr.discarded nr.pair.truncated pr.combined pr.pair.truncated > adapter_summary_siberia.txt
+for rid in $list; do  ## rid list of siberia samples
+    logf=($(ls ./EL012/${rid}/${rid}.L35.fq.settings))
+    n01=($(cat ${logf} | awk '{if ($0 ~ /^Total number of read pairs/) print $NF}'))
+    n02=($(cat ${logf} | awk '{if ($0 ~ /^Number of full-length collapsed pairs/) print $NF}'))
+    n03=($(cat ${logf} | awk '{if ($0 ~ /^Number of truncated collapsed pairs/) print $NF}'))
+    n04=($(cat ${logf} | awk '{if ($0 ~ /^Number of singleton mate 1 reads/) print $NF}'))
+    n05=($(cat ${logf} | awk '{if ($0 ~ /^Number of discarded mate 1 reads/) print $NF}'))
+    tnum1=($(cat ${logf} | awk '{if ($0 ~ /^Number of retained reads/) print $NF}'))
+    let tnum2=(${n02}+${n03}+${n04})
+    let n06=(${tnum1}-${n02}-${n03}-${n04})/2
+    echo ${rid} ${n01} ${n02} ${n03} ${n04} ${n05} ${n06} ${tnum2}| \
+        awk '{print $1, $2, $3, $4, $5, $6, $7, $8/$2, $7/$2}'
+done >> adapter_summary_siberia.txt
+
+
+
+############################################################################
+## Save the following as "Pecnerova2023_adapter_removal_script_231221.sh" ## 
+
+#!/bin/bash
+
+listf=$1   ## A list of samples to be processed (cn, iid, fq1)
+reff=$2    ## the reference genome list file
+inum=$SLURM_ARRAY_TASK_ID
+
+pt1=($(pwd)"/")
+
+iid=($(awk -v inum="$inum" '{if (inum == $1) print $2}' ${listf}))   ## Individual/library ID
+rid=($(awk -v inum="$inum" '{if (inum == $1) print $3}' ${listf}))   ## Run ID
+fq1=($(awk -v inum="$inum" '{if (inum == $1) print $4}' ${listf}))   ## FastQ R1
+fq2=($(echo ${fq1} | sed s/"_1.fq.gz"/"_2.fq.gz"/g))
+
+type="non-UDG"
+seedval="32"; if [[ "$type" == "ssLib" ]] || [[ "$type" == "non-UDG" ]]; then seedval="9999"; fi
+
+## Create directories
+mkdir -p ./FastQ/${iid}/${rid}/ ./BAM/${iid}/ ./VCF/${iid}/ ./qualimap/${iid}/ ./mapDamage/${iid}/
+
+
+##############################################################
+## Part 1. Run AdapterRemoval (keep 35 bp or longer reads)  ##
+
+## Common options for AdapterRemoval; keep minlength 35 bps
+optstr="--gzip --threads 8 --trimns --trimqualities "
+optstr+="--adapter1 AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC "
+optstr+="--adapter2 AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGTA "
+optstr+="--minlength 35 --minquality 20 --minadapteroverlap 1"
+
+cd ${pt1}FastQ/${iid}/${rid}/
+
+fqout=${rid}".L35.fq"
+
+## Run AdapterRemoval (PE)
+AdapterRemoval --file1 ${fq1} --file2 ${fq2} --basename ${fqout} ${optstr} --collapse
+zcat ${fqout}.collapsed.gz ${fqout}.collapsed.truncated.gz ${fqout}.singleton.truncated.gz \
+   | gzip > ${fqout}.combined.gz
+
+
+
+
+
+####################################################################
+## Save the following as "Pecnerova2023_mapping_script_250803.sh" ##
+
+#!/bin/bash
+
+listf=$1   ## A list of samples to be processed (cn, iid, fq1)
+reff=$2    ## the reference genome list file
+inum=$SLURM_ARRAY_TASK_ID
+
+pt1=($(pwd)"/")
+
+iid=($(awk -v inum="$inum" '{if (inum == $1) print $2}' ${listf}))   ## Individual/library ID
+rid=($(awk -v inum="$inum" '{if (inum == $1) print $3}' ${listf}))   ## Run ID
+fq1=($(awk -v inum="$inum" '{if (inum == $1) print $4}' ${listf}))   ## FastQ R1
+fq2=($(echo ${fq1} | sed s/"_1.fq.gz"/"_2.fq.gz"/g))
+
+type="non-UDG"
+seedval="32"; if [[ "$type" == "ssLib" ]] || [[ "$type" == "non-UDG" ]]; then seedval="9999"; fi
+
+fqout=${rid}".L35.fq"
+
+
+#####################################################################
+## Part 1. Map adapter-removed FastQ files to the reference genome ##
+
+mkdir -p ${pt1}/newBAM/${iid}/${rid}/; cd ${pt1}/newBAM/${iid}/${rid}/
+
+## Define read group
+RG="@RG\tID:"${iid}"\tSM:"${iid}"\tLB:"${iid}"\tPL:illumina"
+
+## Repeat data processing for each reference
+while read -r refn ref; do
+
+    ## Collapsed input FastQ (after running AdapterRemoval)
+    fqin0=${pt1}"FastQ/"${iid}"/"${rid}"/"${fqout}".combined.gz"
+
+    ## Setup output BAM file prefix
+    of0=${rid}"."${refn}".mapped"
+
+    ## Run BWA aln (-l 9999 for non-UDG, -l 32 for UDG-half)
+    bwa aln -t 8 -n 0.01 -l ${seedval} -f ${of0}.sai ${ref} ${fqin0}
+
+    ## Run BWA samse and filter out unmapped reads
+    bwa samse -r ${RG} ${ref} ${of0}.sai ${fqin0} | samtools view -h -F 0x0004 -o ${of0}.0.bam -
+
+    ## Sort the output file and index
+    samtools sort -@ 7 -m 512M ${of0}.0.bam -o ${of0}.bam
+    samtools index ${of0}.bam
+
+    ## Remove temporary files
+    rm ${of0}.0.bam
+    rm ${of0}.sai
+
+done < <(head -1 ${reff})
+
+
+
+
+
+####################################################################
+## Save the following as "Pecnerova2023_merging_script_250803.sh" ##
+
+#!/bin/bash
+
+listf=$1   ## A list of samples to be processed (cn, iid, rid, fq1)
+reff=$2    ## the reference genome list file
+
+pt1=($(pwd)"/")
+
+iid=($(awk '{if (NR == 1) print $2}' ${listf}))   ## Individual/library ID
+refn="Muskox"
+ref=($(awk -v refn="$refn" '{if ($1 == refn) print $2}' ${reff}))
+
+
+###################################################
+## Part 3. Merge the separately mapped BAM files ##
+
+cd ${pt1}newBAM/${iid}/
+
+## Create a list of BAM files to be merged
+ibams=""; while read -r rid; do
+    ibam=($(realpath ${pt1}newBAM/${iid}/${rid}/${rid}.Muskox.mapped.bam))
+    if [[ "$ibams" == "" ]]; then ibams+=${ibam}; else ibams+=" "${ibam}; fi
+done < <(cat $listf | awk '{print $3}')
+
+of0=${iid}".Muskox.mapped"
+
+## Merge the BAM files and sort the output file and index
+samtools merge -cp -@ 7 ${of0}.1.bam ${ibams}
+samtools sort -@ 7 -m 512M ${of0}.1.bam -o ${of0}.bam
+samtools index ${of0}.bam
+
+## Remove temporary files
+rm ${of0}.1.bam
+
+
+#############################################################
+## Part 4. Remove duplicates and then apply -q30 filter    ##
+##         Try this with whole BAM with java memory option ##
+
+cd ${pt1}newBAM/${iid}/
+
+dedup="/usr/bin/java -d64 -Xmx12000m "
+dedup+="-jar /opt/ohpc/pub/apps/dedup/0.12.8/DeDup-0.12.8.jar"
+
+picard="/usr/bin/java -Xmx12000m "
+picard+="-jar /opt/ohpc/pub/apps/picardtools/2.27.1/picard.jar MarkDuplicates"
+picardstr="REMOVE_DUPLICATES=true ASSUME_SORTED=true "
+picardstr+="MAX_FILE_HANDLES_FOR_READ_ENDS_MAP=1000 VALIDATION_STRINGENCY=LENIENT"
+
+## Process by read type
+read="SE"
+for type in ${read}; do
+    inbam=${iid}"."${refn}".mapped"
+    of1=${inbam}".rmdup"
+    of2=${inbam}".rmdup.q30"
+
+    ## Remove duplicates
+    if [[ "$type" == "SE" ]]; then
+        ${dedup} -i ${inbam}.bam -m -o ./
+        mv ${inbam}_rmdup.bam ${of1}.bam
+        samtools index ${of1}.bam
+        rm ${inbam}.dedup.json
+    else
+        ${picard} INPUT=${inbam}.bam OUTPUT=${of1}.bam METRICS_FILE=${of1}.metric.txt ${picardstr} TMP_DIR=${pt1}/BAM/${iid}/ &> ${of1}.log1
+        samtools index ${of1}.bam
+    fi
+
+    ## Apply quality filter
+    samtools view -bh -q30 -o ${of2}.bam ${of1}.bam
+    samtools index ${of2}.bam
+
+done
