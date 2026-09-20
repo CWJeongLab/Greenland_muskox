@@ -1,0 +1,299 @@
+#########################################################
+## 0. Download the files from ENA and check the md5sum ##
+#########################################################
+
+## 1 sample (Li et al., 2022)
+## 12 samples (Yang et al., 2022)
+
+
+
+
+
+#############################################################################
+## 1. Run BWA mem2 without adapter removal (because these are modern PE).  ##
+##    Remove duplicates with each bam file and apply -q30 filter.          ##
+#############################################################################
+
+cd /data2/PubData/Yang2022MBE/
+
+pt1=($(pwd)"/")
+scf1=${pt1}"Yang2022_bwamem2_script_250724.sh"
+listf=${pt1}"Yang2022_file_path_250724.txt"
+reff="/data2/projects1/Muskox/DataProcessing/Muskox_ref_list_250519.txt"
+
+## Run the jobs
+sbatch --array=1-12 -c 8 --mem 15000 -J mapping -p amd --wrap=${scf1}" "${listf}" "${reff}
+
+
+################################################################
+## Save the following as "Yang2022_bwamem2_script_250724.sh"  ##
+
+#!/bin/bash
+
+listf=$1   ## A list of samples to be processed (cn, iid, sid, fq1)
+reff=$2    ## the reference genome list file
+inum=$SLURM_ARRAY_TASK_ID
+
+pt1=($(pwd)"/")
+
+iid=($(awk -v inum="$inum" '{if (inum == $1) print $2}' ${listf}))   ## Individual ID
+sid=($(awk -v inum="$inum" '{if (inum == $1) print $3}' ${listf}))   ## SRR ID
+fq1=($(awk -v inum="$inum" '{if (inum == $1) print $4}' ${listf}))   ## FastQ R1
+fq2=($(echo ${fq1} | sed s/"_1.fastq.gz"/"_2.fastq.gz"/g))
+
+refn="Muskox"
+ref=($(awk -v refn="$refn" '{if ($1 == refn) print $2}' ${reff}))
+
+## Create directories
+mkdir -p ./newBAM/${iid}/ ./VCF/${iid}/ ./qualimap/${iid}.chrLV/ ./mapDamage/${iid}.chrLV/
+
+
+##############################################################
+## Part 1. Map FASTQ files to the reference using BWA mem   ##
+
+cd ${pt1}newBAM/${iid}/
+
+## Define read group
+RG="@RG\tID:"${iid}"\tSM:"${iid}"\tLB:"${iid}"\tPL:illumina"
+
+## Repeat data processing for each reference
+## Setup output BAM file prefix
+of1=${iid}"."${refn}".mapped"
+
+## Run BWA mem and filter out unmapped reads and keep only properly paired reads (-f 0x0003)
+/opt/ohpc/pub/apps/bwa-mem2/bwa-mem2 mem -t 8 -M -R ${RG} ${ref} ${fq1} ${fq2} | samtools view -bh -f 0x0003 -F 0x0004 -o ${of1}.0.bam -
+
+## Sort the output file and index
+samtools sort -@ 7 -m 512M ${of1}.0.bam -o ${of1}.bam
+samtools index ${of1}.bam
+
+## Remove temporary files
+rm ${of1}.0.bam
+
+
+#############################################################
+## Part 2. Remove duplicates and then apply -q30 filter    ##
+##         Try this with whole BAM with java memory option ##
+
+cd ${pt1}newBAM/${iid}/
+
+dedup="/usr/bin/java -d64 -Xmx12000m "
+dedup+="-jar /opt/ohpc/pub/apps/dedup/0.12.8/DeDup-0.12.8.jar"
+
+picard="/usr/bin/java -Xmx12000m "
+picard+="-jar /opt/ohpc/pub/apps/picardtools/2.27.1/picard.jar MarkDuplicates"
+picardstr="REMOVE_DUPLICATES=true ASSUME_SORTED=true "
+picardstr+="MAX_FILE_HANDLES_FOR_READ_ENDS_MAP=1000 VALIDATION_STRINGENCY=LENIENT"
+
+## Process by read type
+read="PE"
+for type in ${read}; do
+    inbam=${iid}"."${refn}".mapped"
+    of1=${inbam}".rmdup"
+    of2=${inbam}".rmdup.q30"
+
+    ## Remove duplicates
+    if [[ "$type" == "SE" ]]; then
+        ${dedup} -i ${inbam}.bam -m -o ./
+        mv ${inbam}_rmdup.bam ${of1}.bam
+        samtools index ${of1}.bam
+        rm ${inbam}.dedup.json
+    else
+        ${picard} INPUT=${inbam}.bam OUTPUT=${of1}.bam METRICS_FILE=${of1}.metric.txt ${picardstr} TMP_DIR=${pt1}/BAM/${iid}/ &> ${of1}.log1
+        samtools index ${of1}.bam
+    fi
+
+    ## Apply quality filter
+    samtools view -bh -q30 -o ${of2}.bam ${of1}.bam
+    samtools index ${of2}.bam
+
+done
+
+
+
+
+
+#############################################################################
+## 2. Run BWA mem2 without adapter removal (because these are modern PE).  ##
+##    Remove duplicates with each bam file and apply -q30 filter.          ##
+#############################################################################
+
+cd /data2/PubData/Li2022MolEcol/
+
+pt1=($(pwd)"/")
+scf1=${pt1}"Li2022_bwamem2_script_250725.sh"
+listf=${pt1}"Li2022_file_path_250725.txt"
+reff="/data2/projects1/Muskox/DataProcessing/Muskox_ref_list_250519.txt"
+
+## Run the jobs
+sbatch --array=1-1 -c 8 --mem 15000 -J mapping -p amd --wrap=${scf1}" "${listf}" "${reff}
+
+## The running files are same as Yang2022
+
+
+
+
+
+######################################################
+## 3. Run qualimap and mapDamage for quality check. ##
+##    Make a summary file for each individual.      ##
+######################################################
+
+cd /data2/PubData/Yang2022MBE/
+
+pt1=($(pwd)"/")
+scf3=${pt1}"Yang2022_processing_summary_script_250803.sh"
+listf=${pt1}"Yang2022_file_path_250724.txt"
+reff="/data2/projects1/Muskox/DataProcessing/Muskox_ref_list_250519.txt"
+
+## Run the jobs
+sbatch --array=1-12 -c 8 --mem 16000 -J summary -p amd --wrap=${scf3}" "${listf}" "${reff}
+
+
+## Wrap up the summary files
+sumf="Yang2022_mapping_summary_250804.txt"
+sumfhv='IID species nr.all nr.mapped pr.mapped nr.uniq CF nr.q30 pr.q30'
+sumfhv+=' GC mn.cov sd.cov TCorAG'
+echo -e ${sumfhv} > ${sumf}
+cat ./newBAM/*/*.summary.txt | sed -n '2~2p' >> ${sumf}
+
+
+## Retrieve mapDamage plots
+while read -r iid; do
+    frag=($(ls mapDamage/${iid}/Muskox.chrLV/Fragmisincorporation_plot.pdf))
+    echo ${frag}
+done < <(cat ${listf} | awk '{print $2}') > dir_frag_SE.txt
+
+while read -r iid; do
+    leng=($(ls mapDamage/${iid}/Muskox.chrLV/Length_plot.pdf))
+    echo ${leng}
+done < <(cat ${listf} | awk '{print $2}') > dir_leng_SE.txt
+
+echo Pecnerova2023_frag_plot_PE_231208.pdf >> dir_frag_PE.txt
+cat dir_frag_PE.txt | xargs pdfunite
+
+
+
+##########################################################################
+## Save the following as "Yang2022_processing_summary_script_250624.sh" ##
+
+#!/bin/bash
+
+listf=$1   ## A list of samples to be processed (cn, iid, sid, fq1)
+reff=$2    ## the reference genome list file
+inum=$SLURM_ARRAY_TASK_ID
+
+pt1=($(pwd)"/")
+
+iid=($(awk -v inum="$inum" '{if (inum == $1) print $2}' ${listf}))   ## Individual ID
+refn="Muskox"
+ref=($(awk -v refn="$refn" '{if ($1 == refn) print $2}' ${reff}))
+
+
+##############################################################
+## Part 1. Calculate per-individual coverage using qualimap ##
+
+cd ${pt1}qualimap/${iid}/
+
+mkdir -p ./${refn}.chrLV/
+ibam=($(realpath ../../newBAM/${iid}/${iid}.${refn}.mapped.rmdup.q30.bam))
+
+## Extract mean coverage for chromosome 23
+cov=$(samtools coverage -H -r 23 ${ibam} | awk '{print $7}')
+
+## Check if coverage is < 50, then run qualimap
+if awk "BEGIN {exit !($cov < 50)}"; then
+    echo "Coverage adequate ($cov), running qualimap..."
+    qualimap bamqc -bam ${ibam} -nt 8 -outdir ./${refn}.chrLV -outformat HTML --java-mem-size=15G
+else
+    echo "Coverage too high ($cov), skipping qualimap for ${iid}"
+fi
+
+
+######################################################
+## Part 2. Run mapDamage to check the overall match ##
+
+cd ${pt1}mapDamage/${iid}/
+
+nrmax=100000
+
+mkdir -p ./${refn}.chrLV/
+ibam=($(realpath ../../newBAM/${iid}/${iid}.${refn}.mapped.rmdup.q30.bam))
+
+## Run mapDamage
+mapDamage -i ${ibam} -r ${ref} -d ./${refn}.chrLV --merge-reference-sequences --no-stat -t ${iid}"."${refn} -n ${nrmax}
+
+
+###############################################################
+## Part 3. Create a summary for each iid-rid-ref combination ##
+
+cd ${pt1}
+
+sumf="./newBAM/"${iid}"/"${iid}"."${refn}".summary.txt"  ## Summary file name (including refn)
+
+## Count total read pairs
+## Add read pairs of each fastq file
+n00=0
+while read -r fq0; do
+    lines=$(zcat ${fq0} | wc -l)
+    n00=$((n00 + lines))
+done < <(awk -v iid="$iid" '{if ($2 == iid) print $4}' ${listf})
+n01=$(awk -v n="$n00" 'BEGIN {print n*2/4}')   ## the number of sequenced read pairs *2
+
+## Count reads from BAM files
+n02=($(samtools view -c ./newBAM/${iid}/${iid}.${refn}.mapped.bam))            ## paired and mapped reads
+n03=($(samtools view -c ./newBAM/${iid}/${iid}.${refn}.mapped.rmdup.bam))      ## unique reads
+n04=($(samtools view -c ./newBAM/${iid}/${iid}.${refn}.mapped.rmdup.q30.bam))  ## unique q30 reads
+
+## Extract GC content and mean coverage from qualimap
+## When the qualimap does not work properly, use samtools coverage instead
+if [ -f ./qualimap/${iid}/${refn}.chrLV/genome_results.txt ]; then
+    n05=($(awk '{if ($0 ~ /GC/) print $NF}' ./qualimap/${iid}/${refn}.chrLV/genome_results.txt | sed s/"%"/""/g))        ## GC content
+    n06=($(awk '{if ($0 ~ /mean cov/) print $NF}' ./qualimap/${iid}/${refn}.chrLV/genome_results.txt | sed s/"X"/""/g))  ## mean coverage
+    n07=($(awk '{if ($0 ~ /std cov/) print $NF}' ./qualimap/${iid}/${refn}.chrLV/genome_results.txt | sed s/"X"/""/g))   ## SD of coverage
+else
+    n05="NA"
+    n06=($(samtools coverage -H -r 1 ./newBAM/${iid}/${iid}.${refn}.mapped.rmdup.q30.bam | awk '{print $7}'))
+    n07="NA"
+fi
+
+## Calculate overall T-->C and A-->G mismatch rate as a distance from the ref seq
+n08=($(tail -n +5 ./mapDamage/${iid}/${refn}.chrLV/misincorporation.txt | \
+    awk 'BEGIN {n1=0; n2=0} {n1+=$5+$8; n2+=$12+$13} END {if (n1 == 0) print "NA"; else print n2/n1}'))
+
+## Write the summary file for each iid-refn combination
+sumfhv='IID species nr.all nr.mapped pr.mapped nr.uniq CF nr.q30 pr.q30'
+sumfhv+=' GC mn.cov sd.cov TCorAG'
+echo -e ${sumfhv} > ${sumf}
+echo ${iid} ${refn} ${n01} ${n02} ${n03} ${n04} ${n05} ${n06} ${n07} ${n08} | \
+    awk '{if ($3 > 0 && $4 > 0) print $1,$2,$3,$4,$4/$3,$5,$4/$5,$6,$6/$5,$7,$8,$9,$10;
+        else print $1,$2,$3,"NA","NA","NA","NA","NA","NA","NA","NA","NA","NA"}' >> ${sumf}
+
+
+
+
+
+######################################################
+## 4. Run qualimap and mapDamage for quality check. ##
+##    Make a summary file for each individual.      ##
+######################################################
+
+cd /data2/PubData/Li2022MolEcol/
+
+pt1=($(pwd)"/")
+scf3=${pt1}"Li2022_processing_summary_script_250803.sh"
+listf=${pt1}"Li2022_file_path_250725.txt"
+reff="/data2/projects1/Muskox/DataProcessing/Muskox_ref_list_250519.txt"
+
+## Run the jobs
+sbatch --array=1-1 -c 8 --mem 16000 -J summary -p amd --wrap=${scf3}" "${listf}" "${reff}
+
+## The running files are same as Yang2022
+
+
+## Wrap up the summary files
+sumf="Li2022_mapping_summary_250804.txt"
+sumfhv='IID species nr.all nr.mapped pr.mapped nr.uniq CF nr.q30 pr.q30'
+sumfhv+=' GC mn.cov sd.cov TCorAG'
+echo -e ${sumfhv} > ${sumf}
+cat ./newBAM/*/*.summary.txt | sed -n '2~2p' >> ${sumf}
