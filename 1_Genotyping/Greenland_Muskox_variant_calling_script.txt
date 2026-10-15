@@ -1,0 +1,334 @@
+##############################################################################################################
+## This script is for the variant calling from published muskox genome (Pecnerova2023; Prewer2022; Lok2024) ##
+##############################################################################################################
+
+##############################################
+## 1. Run the first step of HaplotypeCaller ##
+##############################################
+
+cd /data2/PubData/Pecnerova2023MolEcol/
+
+pt1=($(pwd)"/")
+scf1=${pt1}"Pecnerova2023_haplotypecaller_chromosome_250623.sh"
+listf=${pt1}"Pecnerova2023_file_path_selected.txt"
+#listf=${pt1}"Pecnerova2023_file_path_siberia.txt"
+reff="/data2/projects1/Muskox/DataProcessing/Muskox_ref_list_250519.txt"
+
+## Run the jobs
+sbatch --array=1-110%2 -c 8 --mem 15000 -J HapCall -p amd -w node10 --wrap=${scf1}" "${listf}" "${reff}
+
+#######################################################################################
+## Save the following script as "Pecnerova2023_haplotypecaller_chromosome_250623.sh" ##
+
+#!/bin/bash
+
+listf=$1   ## A list of samples to be processed (cn, iid, fq1)
+reff=$2    ## the reference genome list file
+
+inum=$SLURM_ARRAY_TASK_ID
+
+pt1=($(pwd)"/")
+
+iid=($(awk -v inum="$inum" '{if (inum == $1) print $2}' ${listf}))   ## Individual/library ID
+
+refn="Muskox"
+ref=($(awk -v refn="$refn" '{if (refn == $1) print $2}' ${reff}))
+
+cd ${pt1}newVCF/${iid}/
+
+## Get the input BAM file
+inbam=($(realpath ../../newBAM/${iid}/${iid}.${refn}.mapped.rmdup.q30.bam))
+gvcf=${iid}"."${refn}".mapped.rmdup.q30"
+
+GATKstr="java -Xmx12G -jar /opt/ohpc/pub/apps/gatk/gatk-4.1.2.0/gatk-package-4.1.2.0-local.jar"
+GATKopt="-ERC GVCF -mbq 30 --native-pair-hmm-threads 8"
+
+## Run HaplotypeCaller to call variants and create GVCF
+## Run HaplotypeCaller per chromosome
+for i in $(seq 1 23); do
+    ${GATKstr} HaplotypeCaller -R ${ref} -I ${inbam} -O ${gvcf}.${i}.g.vcf.gz -L ${i} ${GATKopt}
+done
+
+
+
+
+
+##############################################################
+## 2-1. Run CombineGVCFs to merge GVCFs into a single file  ##
+##      and GenotypeGVCFs to perform joint genotyping       ##
+##############################################################
+
+cd /home/projects1/UmingmakMuskox/CombinedVCFs/
+
+pt1=($(pwd)"/")
+scf2=${pt1}"Run_combine_genotype_gVCFs_250625.sh"
+listf=${pt1}"BAM_VCF_list_250625.txt"
+reff="/data2/projects1/Muskox/DataProcessing/Muskox_ref_list_250519.txt"
+
+## Run parallel jobs by chromosome
+sbatch --array=1-23%2 -J combineGVCFs -c 8 --mem 20000 -p amd -w node10 --wrap=${scf2}" "${listf}" "${reff}
+
+
+##################################################################
+## Save the following as "Run_combine_genotype_gVCFs_250625.sh" ##
+
+#!/bin/bash
+
+listf=$1   ## A list of samples to be processed (cn, iid, bamdir, vcfdir, pop)
+reff=$2    ## the reference genome list file
+inum=$SLURM_ARRAY_TASK_ID
+
+refn="Muskox"
+ref=($(awk -v refn="$refn" '{if ($1 == refn) print $2}' ${reff}))
+
+multigvcf="WGS.REF."${refn}".mapped.rmdup.q30."${inum}
+
+GATKstr="java -Xmx12G -jar /opt/ohpc/pub/apps/gatk/gatk-4.1.2.0/gatk-package-4.1.2.0-local.jar"
+
+## Create a string of input vcf for the combineGVCFs module
+vcfstr=""
+while read -r iid vcfdir; do
+    invcf=($(ls ${vcfdir}/${iid}/${iid}.${refn}.mapped.rmdup.q30.${inum}.g.vcf.gz))
+    vcfstr+=" -V "${invcf}
+done < <(cat ${listf} | awk '{print $2, $4}')
+
+mkdir -p ./250625_WGS_REF_Muskox/; cd ./250625_WGS_REF_Muskox/
+
+## Run CombineGVCFs to merge all GVCFs into a single file
+${GATKstr} CombineGVCFs -R ${ref} ${vcfstr} -O ${multigvcf}.g.vcf.gz
+
+## Run GenotypeGVCFs to create variant calls
+${GATKstr} GenotypeGVCFs -R ${ref} -V ${multigvcf}.g.vcf.gz -O ${multigvcf}.vcf.gz
+
+
+
+##############################################################
+## 2-2. Run CombineGVCFs to merge GVCFs into a single file  ##
+##      and GenotypeGVCFs to perform joint genotyping       ##
+##############################################################
+
+cd /home/projects1/UmingmakMuskox/CombinedVCFs/
+
+pt1=($(pwd)"/")
+scf2=${pt1}"Run_combine_genotype_gVCFs_250821.sh"
+lst1=${pt1}"BAM_VCF_list_250625.txt"
+lst2=${pt1}"BAM_VCF_list_250821.txt"
+
+reff="/data2/projects1/Muskox/DataProcessing/Muskox_ref_list_250519.txt"
+
+## Run parallel jobs by chromosome
+sbatch --array=17-23 -J combineGVCFs -c 8 --mem 20000 -p amd -w node10 --wrap=${scf2}" "${lst1}" "${lst2}" "${reff}
+
+
+##################################################################
+## Save the following as "Run_combine_genotype_gVCFs_250821.sh" ##
+
+#!/bin/bash
+
+lst1=$1    ## A list of samples to be processed (cn, iid, bamdir, vcfdir, pop)
+lst2=$2    ## A list of samples to be processed (cn, mid, bamdir, vcfdir, pop)
+reff=$3    ## the reference genome list file
+inum=$SLURM_ARRAY_TASK_ID
+
+refn="Muskox"
+ref=($(awk -v refn="$refn" '{if ($1 == refn) print $2}' ${reff}))
+
+multigvcf="WGS.REF.GR."${refn}".mapped.rmdup.q30."${inum}
+
+GATKstr="java -Xmx12G -jar /opt/ohpc/pub/apps/gatk/gatk-4.1.2.0/gatk-package-4.1.2.0-local.jar"
+
+## Create a string of input vcf for the combineGVCFs module
+vcfstr=""
+while read -r iid vcfdir; do
+    invcf=($(ls ${vcfdir}/${iid}/${iid}.${refn}.mapped.rmdup.q30.${inum}.g.vcf.gz))
+    vcfstr+=" -V "${invcf}
+done < <(cat ${lst1} | awk '{print $2, $4}')
+while read -r mid vcfdir; do
+    invcf=($(ls ${vcfdir}/${mid}.${refn}/${mid}.${refn}.${inum}.g.vcf.gz))
+    vcfstr+=" -V "${invcf}
+done < <(cat ${lst2} | awk '{print $2, $4}')
+
+mkdir -p ./250821_WGS_REF_GR_Muskox/; cd ./250821_WGS_REF_GR_Muskox/
+
+## Run CombineGVCFs to merge all GVCFs into a single file
+${GATKstr} CombineGVCFs -R ${ref} ${vcfstr} -O ${multigvcf}.g.vcf.gz
+
+## Run GenotypeGVCFs to create variant calls
+${GATKstr} GenotypeGVCFs -R ${ref} -V ${multigvcf}.g.vcf.gz -O ${multigvcf}.vcf.gz
+
+
+
+
+
+########################################################################
+## 3-1. Extract high-quality SNPs in VCF files using SelectVariants   ##
+########################################################################
+
+cd /home/projects1/UmingmakMuskox/CombinedVCFs/250625_WGS_REF_Muskox/
+
+## Make directories
+mkdir -p ./VCF_filtering/; cd ./VCF_filtering/
+
+pt1=($(pwd)"/")
+scf1=($(realpath ../../Filter_Q30_biSNP_script_250627.sh))
+fn1=($(realpath ../WGS.REF.Muskox.mapped.rmdup.q30))
+of1="WGS.REF.Muskox"
+refm="/home/References/Muskox/O.moschatus_RAN27_v1.0/RAN27_v1.0.fa"
+
+## Run the job (it takes only few minutes)
+nchrs=23     ## the number of autosomal chromosomes
+sbatch --array=1-${nchrs} -J filterSNP -c 8 --mem 15000 -p amd --wrap=${scf1}" "${fn1}" "${of1}" "${refm}
+
+## Remove unnecessary files
+rm slurm-*
+
+
+########################################################################
+## Save the following script as "Filter_Q30_biSNP_script_250627.sh"  ##
+
+#!/bin/bash
+
+fn1=$1   ## input VCF prefix
+of1=$2   ## output VCF prefix
+refm=$3  ## Reference .fa
+inum=$SLURM_ARRAY_TASK_ID
+
+invcf=${fn1}"."${inum}".vcf.gz"
+ovcf=${of1}"."${inum}
+
+## Remove deletions and multi-allelic SNPs
+## Take biSNPs with QUAL >= 30
+gatk --java-options '-Xmx12G' SelectVariants -V ${invcf} -R ${refm} \
+     --select "QUAL >= 30.0" --select-type-to-include SNP --restrict-alleles-to BIALLELIC \
+     --exclude-filtered -O ${ovcf}.biSNP.vcf.gz
+
+
+
+###############################################################################
+## 3-2. Set the threshold through variant statistics for VariantsFiltration  ##
+##      This script is written in R                                          ##
+###############################################################################
+
+## Extract variant statistics of the last chromosome
+echo 'CHROM POS REF ALT QUAL DP QD SOR FS MQ MQRankSum ReadPosRankSum ExcessHet AN AC' | sed s/" "/"\t"/g > WGS.REF.Muskox.23.biSNP.txt
+bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\t%QUAL\t%DP\t%QD\t%SOR\t%FS\t%MQ\t%MQRankSum\t%ReadPosRankSum\t%ExcessHet\t%AN\t%AC\n' \
+    WGS.REF.Muskox.23.biSNP.vcf.gz >> WGS.REF.Muskox.23.biSNP.txt
+gzip WGS.REF.Muskox.23.biSNP.txt
+
+
+## R
+rm(list=ls())
+setwd("/home/projects1/UmingmakMuskox/CombinedVCFs/250625_WGS_REF_Muskox/VCF_filtering/")  ## working directory
+
+fn1 = "WGS.REF.Muskox.23.biSNP.txt.gz"     ## text file
+
+d1 = read.table(gzfile(fn1), header=T)
+d1[d1 == "."] = NA
+summary(d1)
+
+## Define bin size of each annotation (DP to AC)
+ivals = c(10, 0.05, 0.01, 0.1, 0.1, 0.01, 0.01, 0.1, 1, 1)
+
+pdf.name = "WGS_Muskox_variant_stats_plot_250627.pdf"
+pdf(pdf.name, height=8, width=8)
+par(mar=c(5.1, 4.6, 1.5, 1.1)); par(cex.axis=1.3, cex.lab=1.3, cex.main=1.3)
+for (k in 6:15) {
+    ival = ivals[k-5]
+    nval = names(d1)[k]
+    tv1 = as.numeric(as.vector(as.matrix(d1[,k])))
+    tfv1 = !is.na(tv1)
+    tv1 = tv1[tfv1]
+
+    ## xmin1 = floor(min(tv1)/ival)*ival
+    ## xmax1 = ceiling(max(tv1)/ival)*ival
+    xmin1 = floor(quantile(tv1, 0.01)/ival)*ival    ##  1% percentile
+    xmax1 = ceiling(quantile(tv1, 0.99)/ival)*ival  ## 99% percentile
+    ivec = seq(xmin1, xmax1, ival)  ## Adjust ival to make ~500 bins (>>100 & <<1000)
+    xv1 = ivec - ival/2
+
+    tyv1 = unlist(lapply(ivec, function(x) sum(tv1 <= x)))
+    yv1 = tyv1 - c(sum(tv1 < xmin1), tyv1[1:(length(tyv1)-1)])
+    ymax1 = max(c(yv1))
+
+    plot(c(xmin1,xmax1),c(0,ymax1), type="n", xlab=nval, ylab="density", main=nval)
+    #abline(v = 2, col="black", lwd=3, lty=2)
+    polygon(x=c(xv1, rev(xv1)), y=c(yv1, rep(0, length(yv1))), col="#0000FF55", border=NA)
+
+}
+dev.off()
+
+pdf.name = "WGS_Muskox_MQ_zoomin_plot_250627.pdf"
+pdf(pdf.name, height=8, width=8)
+par(mar=c(5.1, 4.6, 1.5, 1.1)); par(cex.axis=1.3, cex.lab=1.3, cex.main=1.3)
+k = 10
+    ival = ivals[k-5]
+    nval = names(d1)[k]
+    tv1 = as.numeric(as.vector(as.matrix(d1[,k])))
+    tfv1 = !is.na(tv1)
+    tv1 = tv1[tfv1]
+
+    ## xmin1 = floor(min(tv1)/ival)*ival
+    ## xmax1 = ceiling(max(tv1)/ival)*ival
+    xmin1 = floor(quantile(tv1, 0.01)/ival)*ival
+    xmax1 = ceiling(quantile(tv1, 0.99)/ival)*ival
+    ivec = seq(xmin1, xmax1, ival)
+    xv1 = ivec - ival/2
+
+    tyv1 = unlist(lapply(ivec, function(x) sum(tv1 <= x)))
+    yv1 = tyv1 - c(sum(tv1 < xmin1), tyv1[1:(length(tyv1)-1)])
+    ymax1 = max(c(yv1))
+
+    plot(c(35,65),c(0,120000), type="n", xlab=nval, ylab="density", main=nval)
+    #abline(v = 2, col="black", lwd=3, lty=2)
+    polygon(x=c(xv1, rev(xv1)), y=c(yv1, rep(0, length(yv1))), col="#0000FF55", border=NA)
+    abline(v=40, col="red", lty=2)
+
+dev.off()
+
+
+
+#############################################################################
+## 3-3. Filter variants according to thresholds using VariantsFiltration   ##
+#############################################################################
+
+cd /home/projects1/Muskox/combinedVCFs/220711_SKZ_Muskox/VCF_filtering/
+
+pt1=($(pwd)"/")
+scf2=($(realpath ../../Variants_filtration_script_250627.sh))
+fn1=${pt1}"WGS.REF.Muskox"
+of1="WGS.REF.Muskox.filter_marked"
+of2="WGS.REF.Muskox.filter_passed"
+refm="/home/References/Muskox/O.moschatus_RAN27_v1.0/RAN27_v1.0.fa"
+
+## Run the job (it takes only few minutes)
+nchrs=23  ## the number of autosomal chromosomes
+sbatch --array=1-${nchrs} -J HardFilter -c 8 --mem 15000 -p amd --wrap=${scf2}" "${fn1}" "${of1}" "${of2}" "${refm}
+
+## Remove unnecessary files
+rm slurm-*
+
+
+#####################################################################
+## Save the following as "Variants_filtration_script_250627.sh"    ##
+
+#!/bin/bash
+
+fn1=$1   ## input VCF prefix
+of1=$2   ## output VCF prefix
+of2=$3   ## filter passed output VCF prefix
+refm=$4  ## Reference .fa
+inum=$SLURM_ARRAY_TASK_ID
+
+invcf=${fn1}"."${inum}".biSNP.vcf.gz"
+ovcf1=${of1}"."${inum}".vcf.gz"
+ovcf2=${of2}"."${inum}".vcf.gz"
+
+## Filter variants according to thresholds
+## Median DP is about 1182
+gatk --java-options '-Xmx12G' VariantFiltration -V ${invcf} -R ${refm} \
+     -filter "DP < 200.0 || DP > 6000.0 || QD < 2.0 || SOR > 3.0 || FS > 60.0 || MQ < 40.0 || MQRankSum < -12.5 || ReadPosRankSum < -8.0 || ExcessHet > 10.0" \
+     --filter-name "LowQual" -O ${ovcf1}
+
+## Keep the passed variants only
+bcftools view -i "FILTER='PASS'" -O z -o ${ovcf2} ${ovcf1}
+gatk IndexFeatureFile -F ${ovcf2}
