@@ -1,0 +1,609 @@
+######################################################################
+## 1. DataProcessing - follow the ancient dataprocessing pipeline   ##
+##                     genotyping script omitted here               ##
+######################################################################
+
+cd /home/projects1/UmingmakMuskox/DataProcessing/
+
+pt1=($(pwd)"/")
+
+listf=${pt1}"DataProcessing_GRN_list_250710.txt"
+reff=${pt1}"reflist.txt"
+scf1=${pt1}"Jeonglab_dataprocessing_ancient_250713.sh"
+
+## Run the job as a job array
+## Run only the limited number of jobs at a time
+idnmax=($(wc -l ${listf}))
+nperrun=4; if [ "$idnmax" -lt "$nperrun" ]; then nperrun=${idnmax}; fi
+
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 15000 -p amd -J Mapping --wrap=${scf1}" "${listf}" "${reff}
+sbatch --array=36-43%${nperrun} -c 8 --mem 15000 -p amd -J Mapping --wrap=${scf1}" "${listf}" "${reff}
+
+
+##########################################################################
+## Save the following as "Jeonglab_dataprocessing_ancient_250713.sh"    ##
+
+#!/bin/bash
+
+pt1=($(pwd)"/")
+
+listf=$1   ## A list of samples to be processed (ID, LID, RID, FastQs, type, reference)
+reff=$2    ## the reference genome list file
+inum=$SLURM_ARRAY_TASK_ID
+
+iid=($(awk -v inum="$inum" '{if (inum == NR) print $1}' ${listf}))   ## Individual ID
+lid=($(awk -v inum="$inum" '{if (inum == NR) print $2}' ${listf}))   ## library ID
+rid=($(awk -v inum="$inum" '{if (inum == NR) print $3}' ${listf}))   ## run ID
+tfqs=($(awk -v inum="$inum" '{if (inum == NR) print $4}' ${listf}))  ## comma separated FastQ files
+type=($(awk -v inum="$inum" '{if (inum == NR) print $5}' ${listf}))  ## library type
+spp=($(awk -v inum="$inum" '{if (inum == NR) print $6}' ${listf}))   ## comma separated reference list
+
+seedval="32"; if [[ "$type" == "ssLib" ]] || [[ "$type" == "non-UDG" ]]; then seedval="9999"; fi
+nrmax=100000
+
+start_time=($(date "+%s"))
+
+## Create directories
+mkdir -p ./${iid}/FastQ/ ./${iid}/BAM/ ./${iid}/mapDamage/ ./${iid}/qualimap/ ./${iid}/genotypes/ ./${iid}/summary/
+
+
+##############################################################
+## Part 1. Run AdapterRemoval (keep 35 bp or longer reads)  ##
+
+## Common options for AdapterRemoval; keep minlength 35 bps
+optstr="--gzip --threads 8 --trimns --trimqualities "
+optstr+="--adapter1 AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC "
+optstr+="--adapter2 AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGTA "
+optstr+="--minlength 35 --minquality 20 --minadapteroverlap 1"
+
+cd ${pt1}${iid}/FastQ/
+mkdir -p ${rid}; cd ${rid}
+
+echo -e "\n\n\n"
+echo "################################ 1. Adapter Removal ###################################"
+echo -e "\n\n\n"
+
+## Take a list of FastQ files and decide if they are SE or PE
+stval=($(echo ${tfqs} | sed s/","/"\n"/g | awk '$1 ~ /_R2/ || $1 ~ /_2.fastq.gz/ || $1 ~ /_2.fq.gz/' | wc -l | awk '{if ($1 > 0) print "PE"; else print "SE"}'))
+
+echo -e "This library was "${stval}" sequenced.\n"
+
+fq1s=""
+for fq in $(echo ${tfqs} | sed s/","/"\n"/g | awk '$1 !~ /_R2/ && $1 !~ /_2.fastq.gz/ && $1 !~ /_2.fq.gz/' ); do
+    if [[ "$fq1s" == "" ]]; then fq1s+=${fq}; else fq1s+=" "${fq}; fi
+done
+
+if [[ "$stval" == "PE" ]]; then
+    fq2s=""
+    for fq in $(echo ${tfqs} | sed s/","/"\n"/g | awk '$1 ~ /_R2/ || $1 ~ /_2.fastq.gz/ || $1 ~ /_2.fq.gz/'); do
+        if [[ "$fq2s" == "" ]]; then fq2s+=${fq}; else fq2s+=" "${fq}; fi
+    done
+fi
+
+echo -e "Fastq1s:  "${fq1s}", Fastq2s: "${fq2s}"\n"
+
+fqout=${rid}".L35.fq"
+
+## Run AdapterRemoval
+if [[ "$stval" == "SE" ]]; then
+   AdapterRemoval --file1 ${fq1s} --basename ${fqout} ${optstr}
+else
+   AdapterRemoval --file1 ${fq1s} --file2 ${fq2s} --basename ${fqout} ${optstr} --collapse
+   zcat ${fqout}.collapsed.gz ${fqout}.collapsed.truncated.gz ${fqout}.singleton.truncated.gz \
+   | gzip > ${fqout}.combined.gz
+fi
+
+end_1=($(date "+%s"))
+let diff=end_1-start_time
+let hour=diff/3600
+let minute=(diff-hour*3600)/60
+let second=(diff-hour*3600-minute*60)
+
+echo -e "\n\nAdapter Removal is complete, ${hour}h ${minute}m ${second}s was taken.\n\n"
+
+
+#######################################################################
+## Part 2. Map adapter-removed FastQ files to the reference genome   ##
+##         and remove duplicates and filter reads                    ##
+
+## DeDup was changed from 0.12.5 to 0.12.8 in the new setup
+dedup="java -Xmx8192m -jar /opt/ohpc/pub/apps/dedup/0.12.8/DeDup-0.12.8.jar"
+
+## Move into the target directory
+cd ${pt1}${iid}/BAM/
+
+echo -e "\n\n\n"
+echo "################################ 2. Read Mapping ###################################"
+echo -e "\n\n\n"
+
+## Input FastQ (after running AdapterRemoval)
+if [[ "$stval" == "SE" ]]; then
+    fqin=${pt1}${iid}"/FastQ/"${rid}"/"${fqout}".truncated.gz"
+else
+    fqin=${pt1}${iid}"/FastQ/"${rid}"/"${fqout}".combined.gz"
+fi
+
+echo -e ${fqin}" is used for mapping\n"
+
+## Repeat mapping steps for each reference species requested
+echo -e "Mapping on each reference\n"
+snum=0
+end_21=${end_1}
+for sp in $(echo ${spp} | sed s/","/" "/g); do
+    let snum+=1
+    echo -e "2."${snum}" Read Mapping on "${sp}"\n"
+
+    ref=($(awk -v sp="$sp" '{if ($1 == sp) print $2}' ${reff}))  ## Take the reference genome .fa file
+    sid=${rid}"."${sp}
+
+    ## Make directory for each run id + reference
+    mkdir -p ${sid}
+
+    ## Setup output BAM file prefix
+    of1="./"${sid}"/"${sid}".L35.mapped"
+
+    ## Define read group
+    RG="@RG\tID:"${rid}"\tSM:"${lid}"\tLB:"${rid}"\tPL:illumina"
+
+    ## Run BWA aln (-l 9999 for non-UDG, -l 32 for UDG-half)
+    bwa aln -t 8 -n 0.01 -l ${seedval} -f ${of1}.sai ${ref} ${fqin}
+
+    ## Run BWA samse and filter out unmapped reads
+    bwa samse -r ${RG} ${ref} ${of1}.sai ${fqin} | samtools view -h -F 0x0004 -o ${of1}.0.bam -
+
+    ## Sort the output file and index
+    samtools sort -@ 2 -m 4G ${of1}.0.bam -o ${of1}.bam
+    samtools index ${of1}.bam
+
+    ## Remove temporary files
+    rm ${of1}.0.bam
+    rm ${of1}.sai
+
+    ## Remove duplicates using dedup
+    ${dedup} -i ${of1}.bam -m -o ./${sid}/
+    mv ${of1}_rmdup.bam ${of1}.rmdup.bam
+    samtools index ${of1}.rmdup.bam
+    rm ${of1}.dedup.json
+
+    mv ${of1}.hist ${of1}.rmdup.hist
+    mv ${of1}.log ${of1}.rmdup.log
+
+    ## Apply quality filter (-q30)
+    samtools view -bh -q30 -o ${of1}.rmdup.q30.bam ${of1}.rmdup.bam
+    samtools index ${of1}.rmdup.q30.bam
+
+    end_20=${end_21}
+    end_21=($(date "+%s"))
+
+    let diff=end_21-end_20
+    let hour=diff/3600
+    let minute=(diff-hour*3600)/60
+    let second=(diff-hour*3600-minute*60)
+
+    echo -e "\n\nMapping on "${sp}" is finished, ${hour}h ${minute}m ${second}s was taken.\n\n"
+
+done
+
+let diff=end_21-end_1
+let hour=diff/3600
+let minute=(diff-hour*3600)/60
+let second=(diff-hour*3600-minute*60)
+
+echo -e "\n\nMapping is totally complete, ${hour}h ${minute}m ${second}s was taken.\n\n"
+
+
+############################
+## Part 3. Run mapDamage  ##
+
+cd ${pt1}${iid}/mapDamage/
+
+echo -e "\n\n\n"
+echo "################################ 3. Check mapDamage ###################################"
+echo -e "\n\n\n"
+
+for sp in $(echo ${spp} | sed s/","/" "/g); do
+    ref=($(awk -v sp="$sp" '{if ($1 == sp) print $2}' ${reff}))  ## Take the reference genome .fa file
+    sid=${rid}"."${sp}
+
+    ibam=($(realpath ${pt1}${iid}/BAM/${sid}/${sid}.L35.mapped.rmdup.q30.bam))
+
+    ## Run mapDamage
+    mapDamage -i ${ibam} -r ${ref} -d ./${sid} --merge-reference-sequences  -t ${sid} -n ${nrmax} --no-stat
+done
+
+end_3=($(date "+%s"))
+
+let diff=end_3-end_21
+let hour=diff/3600
+let minute=(diff-hour*3600)/60
+let second=(diff-hour*3600-minute*60)
+
+echo -e "\n\nmapDamage is complete, ${hour}h ${minute}m ${second}s was taken.\n\n"
+
+
+#############################################################
+## Part 4. Calculate whole genome coverage using qualimap  ##
+
+cd ${pt1}${iid}/qualimap/
+
+echo -e "\n\n\n"
+echo "################################ 4. Check qualimap ###################################"
+echo -e "\n\n\n"
+
+for sp in $(echo ${spp} | sed s/","/" "/g); do
+    ref=($(awk -v sp="$sp" '{if ($1 == sp) print $2}' ${reff}))  ## Take the reference genome .fa file
+    sid=${rid}"."${sp}
+
+    ibam=($(realpath ${pt1}${iid}/BAM/${sid}/${sid}.L35.mapped.rmdup.q30.bam))
+
+    ## Run qualimap
+    qualimap bamqc -bam ${ibam} -nt 8 -outdir ./${sid} -outformat HTML --java-mem-size=15G
+done
+
+end_4=($(date "+%s"))
+
+let diff=end_4-end_3
+let hour=diff/3600
+let minute=(diff-hour*3600)/60
+let second=(diff-hour*3600-minute*60)
+
+echo -e "\n\nqualimap is complete, ${hour}h ${minute}m ${second}s was taken.\n\n"
+
+
+#############################################################
+## Part 5. Collect per-individual summary statistic        ##
+
+cd ${pt1}${iid}/summary/
+
+hv='ID LID RID Species nr.all nr.trimmed len.trimmed nr.mapped pr.endo% nr.rmdup cluster.factor nr.rmdup.q30 pr.q30'
+hv+=' DMG51 DMG52 DMG31 DMG32 Auto chrX chrY chrMT'
+
+echo -e "\n\n\n"
+echo "################################ 5. Summarize ###################################"
+echo -e "\n\n\n"
+
+for sp in $(echo ${spp} | sed s/","/" "/g); do
+    ref=($(awk -v sp="$sp" '{if ($1 == sp) print $2}' ${reff}))  ## Take the reference genome .fa file
+    sid=${rid}"."${sp}
+
+    ## Make directory for each run id + reference
+    mkdir -p ${sid}
+    sumf="./"${sid}"/"${sid}".summary.txt"
+
+    echo -e ${hv} > ${sumf}
+
+    ## FastQ summary
+    logf=($(realpath ${pt1}${iid}/FastQ/${rid}/${rid}.L35.fq.settings))
+    n1=($(cat ${logf} | awk '{if ($1 ~ /^Total/) print $NF}'))
+    n2=($(cat ${logf} | awk 'BEGIN {n=0} {if ($0 ~ /^Number/ && ($0 ~ /collapsed/ || $0 ~ /singleton/)) n+=$NF} END {print n}'))
+    n3=($(cat ${logf} | awk '{if ($0 ~ /Average length of retained reads/) print $NF}'))
+
+    ## Mapping summary
+    tof1=${pt1}${iid}"/BAM/"${sid}"/"${sid}".L35.mapped"
+    n4=($(samtools view -c ${tof1}.bam))
+    n5=($(echo ${n2} ${n4} | awk '{if ($1 > 0) print 100*$2/$1; else print "NA"}')) # pr.endo
+    n6=($(samtools view -c ${tof1}.rmdup.bam))
+    n7=($(echo ${n6} ${n4} | awk '{if ($1 > 0) print $2/$1; else print "NA"}')) # cluster.factor
+    n8=($(samtools view -c ${tof1}.rmdup.q30.bam))
+    n9=($(echo ${n6} ${n8}|awk '{if ($1 > 0) print $2/$1; else print "NA"}')) # pr.q30
+
+    ## mapDamage summary
+    tfn1=${pt1}${iid}"/mapDamage/"${sid}"/5pCtoT_freq.txt"
+    tfn2=${pt1}${iid}"/mapDamage/"${sid}"/3pGtoA_freq.txt"
+    n10=($(head -2 ${tfn1} | tail -1 | awk '{printf("%.5f\n"), $2}'))
+    n11=($(head -3 ${tfn1} | tail -1 | awk '{printf("%.5f\n"), $2}'))
+    n12=($(head -2 ${tfn2} | tail -1 | awk '{printf("%.5f\n"), $2}'))
+    n13=($(head -3 ${tfn2} | tail -1 | awk '{printf("%.5f\n"), $2}'))
+
+    ## Coverage summary
+    qual=${pt1}${iid}"/qualimap/"${sid}"/genome_results.txt"
+    aC=($(grep "mean coverageData" ${qual} | awk '{print $4}'| sed s/"X"/""/g | awk '{printf("%.5f\n"), $1}'))
+    if [[ "$sp" == "Muskox" ]] || [[ "$sp" == "Takin" ]] || [[ "$sp" == "Goat" ]] || [[ "$sp" == "Cattle" ]] || [[ "$sp" == "Reindeer" ]]; then
+        xC=($(grep -w "X" ${qual} | awk '{printf("%.5f\n"), $4}'))
+        yC=($(grep -w "Y" ${qual} | awk '{printf("%.5f\n"), $4}'))
+        mC=($(grep -w "MT" ${qual} | awk '{printf("%.2f\n"), $4}'))
+    elif [[ "$sp" == "Sheep" ]] || [[ "$sp" == "Horse" ]] || [[ "$sp" == "Dog" ]]; then
+        xC=($(grep -w "chrX" ${qual} | awk '{printf("%.5f\n"), $4}'))
+        yC="NA"
+        mC=($(grep -w "chrM" ${qual} | awk '{printf("%.5f\n"), $4}'))
+    elif [[ "$sp" == "Serow" ]]; then
+        xC=($(grep -w "X" ${qual} | awk '{printf("%.5f\n"), $4}'))
+        yC="NA"
+        mC=($(grep -w "MT" ${qual} | awk '{printf("%.5f\n"), $4}'))
+    fi
+
+    echo ${iid} ${lid} ${rid} ${sp} ${n1} ${n2} ${n3} ${n4} ${n5} ${n6} ${n7} ${n8} ${n9} ${n10} ${n11} ${n12} ${n13} ${aC} ${xC} ${yC} ${mC} >> ${sumf}
+
+done
+
+end_5=($(date "+%s"))
+echo -e "summarizing is complete."
+
+let diff=end_5-start_time
+let hour=diff/3600
+let minute=(diff-hour*3600)/60
+let second=(diff-hour*3600-minute*60)
+
+echo -e ${rid} "is totally processed, ${hour}h ${minute}m ${second}s was taken.\n\n\n\n"
+
+
+
+
+
+##########################################################################
+## 2. DataProcessing - follow the ancient merging pipeline              ##
+##                     be sure to change the read group with same name  ##
+##                     genotyping script omitted here                   ##
+##########################################################################
+
+cd /home/projects1/UmingmakMuskox/DataProcessing/
+
+pt1=($(pwd)"/")
+
+listf=${pt1}"DataProcessing_GRN_merge_list_250711.txt"
+reff=${pt1}"reflist.txt"
+scf1=${pt1}"Jeonglab_dataprocessing_ancient_merge_250713.sh"
+
+## Run the job as a job array
+## Run only the limited number of jobs at a time
+idnmax=($(wc -l ${listf}))
+nperrun=2; if [ "$idnmax" -lt "$nperrun" ]; then nperrun=${idnmax}; fi
+
+sbatch --array=1-${idnmax} -c 8 --mem 15000 -J Merging --wrap=${scf1}" "${listf}" "${reff}
+
+
+##############################################################################
+## Save the following as "Jeonglab_dataprocessing_ancient_merge_250713.sh"  ##
+
+#!/bin/bash
+
+pt1=($(pwd)"/")
+
+inum=$SLURM_ARRAY_TASK_ID
+listf=$1    ## A list of samples to be processed (IID, LID, RIDS, MID, type, species)
+reff=$2     ## the reference genome list file
+
+iid=($(awk -v inum="$inum" '{if (inum == NR) print $1}' ${listf}))  ## individual ID
+lid=($(awk -v inum="$inum" '{if (inum == NR) print $2}' ${listf}))  ## library ID, if you merge multiple libraries, then use IID instead of LID
+mid=($(awk -v inum="$inum" '{if (inum == NR) print $3}' ${listf}))  ## merged id
+rids=($(awk -v inum="$inum" '{if (inum == NR) print $4}' ${listf})) ## run ids supposed to be merged
+type=($(awk -v inum="$inum" '{if (inum == NR) print $5}' ${listf})) ## library type
+spp=($(awk -v inum="$inum" '{if (inum == NR) print $6}' ${listf}))  ## comma separated species list
+
+nrmax=100000
+
+start_time=($(date "+%s"))
+
+
+#######################################################################
+## Part 1. Merge BAM files and remove duplicates and filter reads    ##
+
+## DeDup was changed from 0.12.5 to 0.12.8 in the new setup
+dedup="java -Xmx8192m -jar /opt/ohpc/pub/apps/dedup/0.12.8/DeDup-0.12.8.jar"
+
+## Move into the target directory
+cd ${pt1}${iid}/BAM/
+
+echo -e "\n\n\n"
+echo "################################ 1. Merge ###################################"
+echo -e "\n\n\n"
+
+## Repeat mapping steps for each reference species requested
+echo -e "Merge BAMs on each reference\n"
+snum=0
+end_11=${start}
+for sp in $(echo ${spp} | sed s/","/" "/g); do
+    let snum+=1
+    echo -e "1."${snum}" Merge BAMs on "${sp}"\n"
+
+    ref=($(awk -v sp="$sp" '{if ($1 == sp) print $2}' ${reff}))  ## Take the reference genome .fa file
+    sid=${mid}"."${sp}
+
+    ## Make directory for each run id + reference
+    mkdir -p ${sid}
+
+    ## Setup output BAM file prefix
+    of1="./"${sid}"/"${sid}".L35.mapped"
+
+    ## Define read group
+    RG="@RG\tID:"${mid}"\tSM:"${lid}"\tLB:"${mid}"\tPL:illumina"
+
+    ## Retrieve each round of BAM files to be merged
+    ibam1s=""
+    while read rid; do
+        tibam=${pt1}${iid}/BAM/${rid}"."${sp}/${rid}"."${sp}".L35.mapped.bam"
+        if [[ "$ibam1s" == "" ]]; then ibam1s=${tibam}; else ibam1s+=" "${tibam}; fi
+    done < <(echo ${rids}| sed s/","/"\n"/g)
+
+    ## Merge the BAM files
+    samtools merge -@ 3 -cpf ${of1}.0.bam ${ibam1s}
+
+    ## Replace the read group
+    samtools addreplacerg -@ 3 -r ${RG} ${of1}.0.bam -o ${of1}.1.bam
+
+    ## Sort the output file and index
+    samtools sort -@ 3 -m 4G ${of1}.1.bam -o ${of1}.bam
+    samtools index ${of1}.bam
+
+    ## Remove temporary files
+    rm ${of1}.0.bam
+    rm ${of1}.1.bam
+
+    ## Remove duplicates using dedup
+    ${dedup} -i ${of1}.bam -m -o ./${sid}/
+    mv ${of1}_rmdup.bam ${of1}.rmdup.bam
+    samtools index ${of1}.rmdup.bam
+    rm ${of1}.dedup.json
+
+    mv ${of1}.hist ${of1}.rmdup.hist
+    mv ${of1}.log ${of1}.rmdup.log
+
+    ## Apply quality filter (-q30)
+    samtools view -bh -q30 -o ${of1}.rmdup.q30.bam ${of1}.rmdup.bam
+    samtools index ${of1}.rmdup.q30.bam
+
+    end_10=${end_11}
+    end_11=($(date "+%s"))
+
+    let diff=end_11-end_10
+    let hour=diff/3600
+    let minute=(diff-hour*3600)/60
+    let second=(diff-hour*3600-minute*60)
+
+    echo -e "\n\nMerging BAMs on "${sp}" is finished, ${hour}h ${minute}m ${second}s was taken.\n\n"
+
+done
+
+let diff=end_11-start
+let hour=diff/3600
+let minute=(diff-hour*3600)/60
+let second=(diff-hour*3600-minute*60)
+
+echo -e "\n\nMerging BAMs is totally complete, ${hour}h ${minute}m ${second}s was taken.\n\n"
+
+
+############################
+## Part 2. Run mapDamage  ##
+
+cd ${pt1}${iid}/mapDamage/
+
+echo -e "\n\n\n"
+echo "################################ 2. Check mapDamage ###################################"
+echo -e "\n\n\n"
+
+for sp in $(echo ${spp} | sed s/","/" "/g); do
+    ref=($(awk -v sp="$sp" '{if ($1 == sp) print $2}' ${reff}))  ## Take the reference genome .fa file
+    sid=${mid}"."${sp}
+
+    ibam=($(realpath ${pt1}${iid}/BAM/${sid}/${sid}.L35.mapped.rmdup.q30.bam))
+
+    ## Run mapDamage
+    mapDamage -i ${ibam} -r ${ref} -d ./${sid} --merge-reference-sequences --no-stat -t ${sid} -n ${nrmax}
+done
+
+end_2=($(date "+%s"))
+
+let diff=end_2-end_11
+let hour=diff/3600
+let minute=(diff-hour*3600)/60
+let second=(diff-hour*3600-minute*60)
+
+echo -e "\n\nmapDamage is complete, ${hour}h ${minute}m ${second}s was taken.\n\n"
+
+
+#############################################################
+## Part 3. Calculate whole genome coverage using qualimap  ##
+
+cd ${pt1}${iid}/qualimap/
+
+echo -e "\n\n\n"
+echo "################################ 3. Check qualimap ###################################"
+echo -e "\n\n\n"
+
+for sp in $(echo ${spp} | sed s/","/" "/g); do
+    ref=($(awk -v sp="$sp" '{if ($1 == sp) print $2}' ${reff}))  ## Take the reference genome .fa file
+    sid=${mid}"."${sp}
+
+    ibam=($(realpath ${pt1}${iid}/BAM/${sid}/${sid}.L35.mapped.rmdup.q30.bam))
+
+    ## Run qualimap
+    qualimap bamqc -bam ${ibam} -nt 8 -outdir ./${sid} -outformat HTML --java-mem-size=15G
+done
+
+end_3=($(date "+%s"))
+
+let diff=end_3-end_2
+let hour=diff/3600
+let minute=(diff-hour*3600)/60
+let second=(diff-hour*3600-minute*60)
+
+echo -e "\n\nqualimap is complete, ${hour}h ${minute}m ${second}s was taken.\n\n"
+
+
+#############################################################
+## Part 4. Collect per-individual summary statistic        ##
+
+cd ${pt1}${iid}/summary/
+
+hv='ID LID RID Species nr.all nr.trimmed len.trimmed nr.mapped pr.endo% nr.rmdup cluster.factor nr.rmdup.q30 pr.q30'
+hv+=' DMG51 DMG52 DMG31 DMG32 Auto chrX chrY chrMT'
+
+echo -e "\n\n\n"
+echo "################################ 5. Summarize ###################################"
+echo -e "\n\n\n"
+
+for sp in $(echo ${spp} | sed s/","/" "/g); do
+    ref=($(awk -v sp="$sp" '{if ($1 == sp) print $2}' ${reff}))  ## Take the reference genome .fa file
+    sid=${mid}"."${sp}
+
+    ## Make directory for each run id + reference
+    mkdir -p ${sid}
+    sumf="./"${sid}"/"${sid}".summary.txt"
+
+    echo -e ${hv} > ${sumf}
+
+    ## FastQ summary
+    ## sum up number of reads and average length of reads
+    snum=0
+    while read rid; do
+        let snum+=1
+        logf=($(realpath ../FastQ/${rid}/${rid}.L35.fq.settings))
+        n01=($(cat ${logf} | awk '{if ($1 ~ /^Total/) print $NF}'))
+        n02=($(cat ${logf} | awk 'BEGIN {n=0} {if ($0 ~ /^Number/ && ($0 ~ /collapsed/ || $0 ~ /singleton/)) n+=$NF} END {print n}'))
+        n03=($(cat ${logf} | awk '{if ($0 ~ /Average length of retained reads/) print $NF}'))
+        if [[ "$snum" -eq 1 ]]; then
+            n1=${n01};n2=${n02};tn3=${n03}
+        else
+            let n1+=n01 ; let n2+=n02; tn3+=" "${n03}
+        fi
+    done< <(echo ${rids}| sed s/","/"\n"/g)
+    n3=($(echo ${tn3}|awk '{for(i=1;i<=NF;i++)sum+=$i}{print sum/NF}'))
+
+    ## Mapping summary
+    tof1=${pt1}${iid}"/BAM/"${sid}"/"${sid}".L35.mapped"
+    n4=($(samtools view -c ${tof1}.bam))
+    n5=($(echo ${n2} ${n4}|awk '{if ($1 > 0) print 100*$2/$1; else print "NA"}')) # pr.endo
+    n6=($(samtools view -c ${tof1}.rmdup.bam))
+    n7=($(echo ${n6} ${n4}|awk '{if ($1 > 0) print $2/$1; else print "NA"}')) # cluster.factor
+    n8=($(samtools view -c ${tof1}.rmdup.q30.bam))
+    n9=($(echo ${n6} ${n8}|awk '{if ($1 > 0) print $2/$1; else print "NA"}')) # pr.q30
+
+    ## mapDamage summary
+    tfn1=${pt1}${iid}"/mapDamage/"${sid}"/5pCtoT_freq.txt"
+    tfn2=${pt1}${iid}"/mapDamage/"${sid}"/3pGtoA_freq.txt"
+    n10=($(head -2 ${tfn1} | tail -1 | awk '{printf("%.5f\n"), $2}'))
+    n11=($(head -3 ${tfn1} | tail -1 | awk '{printf("%.5f\n"), $2}'))
+    n12=($(head -2 ${tfn2} | tail -1 | awk '{printf("%.5f\n"), $2}'))
+    n13=($(head -3 ${tfn2} | tail -1 | awk '{printf("%.5f\n"), $2}'))
+
+
+    ## Coverage summary
+    qual=${pt1}${iid}"/qualimap/"${sid}"/genome_results.txt"
+    aC=($(grep "mean coverageData" ${qual} | awk '{print $4}'| sed s/"X"/""/g | awk '{printf("%.5f\n"), $1}'))
+    if [[ "$sp" == "Muskox" ]] || [[ "$sp" == "Takin" ]] || [[ "$sp" == "Goat" ]] || [[ "$sp" == "Cattle" ]] || [[ "$sp" == "Reindeer" ]]; then
+        xC=($(grep -w "X" ${qual} | awk '{printf("%.5f\n"), $4}'))
+        yC=($(grep -w "Y" ${qual} | awk '{printf("%.5f\n"), $4}'))
+        mC=($(grep -w "MT" ${qual} | awk '{printf("%.2f\n"), $4}'))
+    elif [[ "$sp" == "Sheep" ]] || [[ "$sp" == "Horse" ]] || [[ "$sp" == "Dog" ]]; then
+        xC=($(grep -w "chrX" ${qual} | awk '{printf("%.5f\n"), $4}'))
+        yC="NA"
+        mC=($(grep -w "chrM" ${qual} | awk '{printf("%.5f\n"), $4}'))
+    elif [[ "$sp" == "Serow" ]]; then
+        xC=($(grep -w "X" ${qual} | awk '{printf("%.5f\n"), $4}'))
+        yC="NA"
+        mC=($(grep -w "MT" ${qual} | awk '{printf("%.5f\n"), $4}'))
+    fi
+
+    echo ${iid} ${lid} ${mid} ${sp} ${n1} ${n2} ${n3} ${n4} ${n5} ${n6} ${n7} ${n8} ${n9} ${n10} ${n11} ${n12} ${n13} ${aC} ${xC} ${yC} ${mC} >> ${sumf}
+
+done
+
+end_5=($(date "+%s"))
+echo -e "summarizing is complete."
+
+let diff=end_5-start_time
+let hour=diff/3600
+let minute=(diff-hour*3600)/60
+let second=(diff-hour*3600-minute*60)
+
+echo -e ${mid} "is totally processed, ${hour}h ${minute}m ${second}s was taken.\n\n\n\n"
