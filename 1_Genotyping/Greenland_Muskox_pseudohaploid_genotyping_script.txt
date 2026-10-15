@@ -1,0 +1,371 @@
+###################################################################################################################
+## This script is based on the variants called from published muskox genome (Pecnerova2023; Prewer2022; Lok2024) ##
+###################################################################################################################
+
+##############################################################################################
+## 1. Create a pseudo-haploid pulldown genotypes for the filtered SNPs                      ##
+##    (Filtered SNPs were generated from the modern 110 WGS + 6 REF data + ancient 1 EL012) ##
+##############################################################################################
+
+cd /home/projects1/UmingmakMuskox/genotypes/
+
+cd ./251120_WGS_REF_EL012_Muskox/     ## Change directory with the same name of combinedVCFs
+pt1=($(pwd)"/")
+
+refm="/home/References/Muskox/O.moschatus_RAN27_v1.0/RAN27_v1.0.fa"
+
+## Filtered gVCF file which includes 5,152,998 SNPs in 23 autosomes
+vcf="/home/projects1/UmingmakMuskox/CombinedVCFs/251120_WGS_REF_EL012_Muskox/VCF_filtering/WGS.REF.Muskox.filter_passed"
+posf=${pt1}"WGS.REF.EL012.Muskox.filtered.pos.txt"
+snpf=${pt1}"WGS.REF.EL012.Muskox.filtered.snp"
+
+for i in $(seq 1 23); do
+    bcftools view -H ${vcf}.${i}.vcf.gz | awk '{OFS="\t"} {print $1, $2}' >> ${posf}
+    bcftools view -H ${vcf}.${i}.vcf.gz | awk '{OFS="\t"} {print $1":"$2,$1,"0",$2,$4,$5}' >> ${snpf}
+done
+
+## Create a list of IDs and BAM files
+fn1="/home/projects1/UmingmakMuskox/genotypes/WGS_REF_BAM_list_250804.txt"   ## WGS+REF (Pecnerova 2023; Prewer2022; Lok2024)
+fn2="/home/projects1/UmingmakMuskox/genotypes/TAK_BAM_list_250804.txt"       ## Tak WGS from Yang 2022 and Li 2022
+fn3="/home/projects1/UmingmakMuskox/genotypes/GR_BAM_list_250805.txt"        ## GR WGS from sequenced data
+
+## ssLib with --singleStrandMode
+scf0=$(realpath ../Run_pileup_pulldown_250804.sh)
+scf1=$(realpath ../Run_pileup_pulldown_ssLib_250804.sh)
+scf2=$(realpath ../Run_samtools_coverage_250805.sh)
+
+## Run the job
+## Normally middle coverage bam files take about 1 hour
+nperrun=20
+sbatch --array=1-117%${nperrun} -c 2 --mem 4000 -J genotyping -p amd --wrap=${scf0}" "${fn1}" "${posf}" "${snpf}" "${refm}" "5153K
+sbatch --array=1-13%${nperrun} -c 2 --mem 4000 -J genotyping -p amd --wrap=${scf0}" "${fn2}" "${posf}" "${snpf}" "${refm}" "5153K
+sbatch --array=1-30%${nperrun} -c 2 --mem 4000 -J genotyping -p amd --wrap=${scf0}" "${fn3}" "${posf}" "${snpf}" "${refm}" "5153K
+## ssLib for SKZ
+sbatch --array=31-39%${nperrun} -c 2 --mem 4000 -J genotyping -p amd --wrap=${scf1}" "${fn3}" "${posf}" "${snpf}" "${refm}" "5153K
+
+## Check the ratio of autosomal and sex chromosomal coverage
+sbatch --array=1-117%${nperrun} -c 2 --mem 4000 -J genotyping -p amd --wrap=${scf2}" "${fn1}" "${snpf}" "5153K
+sbatch --array=1-13%${nperrun} -c 2 --mem 4000 -J genotyping -p amd --wrap=${scf2}" "${fn2}" "${snpf}" "5153K
+sbatch --array=1-39%${nperrun} -c 2 --mem 4000 -J genotyping -p amd --wrap=${scf2}" "${fn3}" "${snpf}" "5153K
+
+
+## Check summary statistics per sample from slurm files
+# cat slurm-303263_1.out | tail -8 > pileup.summary.5153K.cov.txt      ## Put the proper numbers
+for i in $(seq 1 17); do cat slurm-303267_$i.out | tail -1; done >> pileup.summary.5153K.cov.txt
+# rm slurm-*
+
+## Merge all the geno files and make ind file with sex
+iids="MSS002 MSS003 MSS004 MSS005 MSS007 MSS008 MSS009 MSS010 MSS011 MSS012 SRP001 SRP002 SRP003 SRP004 SRP005"
+for iid in $iids; do
+    paste ./${iid}/${iid}.A0101.geno ./${iid}/${iid}.A0102.geno | awk '{if ($2 == 9 && $1 != 9) $2 = $1; print $2}' > ./${iid}/${iid}.geno
+done
+for iid in $iids; do
+    paste ./${iid}/${iid}.A0101.ind ./${iid}/${iid}.A0102.ind | \
+    awk -v id="$iid" 'BEGIN {OFS="\t"} {
+        if ($2 == $5) print id, $2, $3
+        else          print id, "U", $3
+    }' > ./${iid}/${iid}.ind
+done
+
+
+## After making ind file first, merge all the geno files
+while read iid; do realpath ./${iid}/${iid}.geno; done < <(cat WGS.REF.GR.Muskox.ind | awk '{print $1}') > geno_file_path
+paste -d '' $(cat geno_file_path) > WGS.REF.GR.Muskox.geno
+
+
+############################################################
+## Save the following as "Run_pileup_pulldown_250804.sh"  ##
+
+#!/bin/bash
+
+listf=$1    ## A list of bam files (nr, iid, bamfile, pop, lid (if exists))
+posf=$2     ## A position file to call genotype
+snpf=$3     ## A snp file
+refm=$4     ## A reference genome file
+panel=$5    ## The number of SNP used in the panel
+inum=$SLURM_ARRAY_TASK_ID
+
+iid=($(awk -v inum="$inum" '{if (inum == $1) print $2}' ${listf}))              ## Individual ID
+lid=($(awk -v inum="$inum" '{if (inum == $1 && NF == 5) print $5}' ${listf}))   ## Library ID (if exists)
+bamf=($(awk -v inum="$inum" '{if (inum == $1) print $3}' ${listf}))             ## BAM file path
+
+mkdir -p ./${iid}/; cd ./${iid}/
+
+if [ -n "$lid" ]; then
+    ## Make pileup file
+    samtools mpileup -B -R -q30 -Q30 -l ${posf} -f ${refm} ${bamf} > ${lid}.pileup
+
+    ## Run pileupCaller
+    pileupCaller --randomHaploid --sampleNames ${lid} -f ${snpf} -e ${lid} < ${lid}.pileup
+
+else
+
+    ## Make pileup file
+    samtools mpileup -B -R -q30 -Q30 -l ${posf} -f ${refm} ${bamf} > ${iid}.pileup
+
+    ## Run pileupCaller
+    pileupCaller --randomHaploid --sampleNames ${iid} -f ${snpf} -e ${iid} < ${iid}.pileup
+
+fi
+
+
+
+##################################################################
+## Save the following as "Run_pileup_pulldown_ssLib_250804.sh"  ##
+
+#!/bin/bash
+
+listf=$1    ## A list of bam files (nr, iid, bamfile, pop, lid (if exists))
+posf=$2     ## A position file to call genotype
+snpf=$3     ## A snp file
+refm=$4     ## A reference genome file
+panel=$5    ## The number of SNP used in the panel
+inum=$SLURM_ARRAY_TASK_ID
+
+iid=($(awk -v inum="$inum" '{if (inum == $1) print $2}' ${listf}))              ## Individual ID
+lid=($(awk -v inum="$inum" '{if (inum == $1 && NF == 5) print $5}' ${listf}))   ## Library ID (if exists)
+bamf=($(awk -v inum="$inum" '{if (inum == $1) print $3}' ${listf}))             ## BAM file path
+
+mkdir -p ./${iid}/; cd ./${iid}/
+
+if [ -n "$lid" ]; then
+    ## Make pileup file
+    samtools mpileup -B -R -q30 -Q30 -l ${posf} -f ${refm} ${bamf} > ${lid}.pileup
+
+    ## Run pileupCaller
+    pileupCaller --randomHaploid --singleStrandMode --sampleNames ${lid} -f ${snpf} -e ${lid} < ${lid}.pileup
+
+else
+
+    ## Make pileup file
+    samtools mpileup -B -R -q30 -Q30 -l ${posf} -f ${refm} ${bamf} > ${iid}.pileup
+
+    ## Run pileupCaller
+    pileupCaller --randomHaploid --singleStrandMode --sampleNames ${iid} -f ${snpf} -e ${iid} < ${iid}.pileup
+
+fi
+
+
+
+##############################################################
+## Save the following as "Run_samtools_coverage_250805.sh"  ##
+
+#!/bin/bash
+
+listf=$1    ## A list of bam files (nr, iid, bamfile, pop, lid (if exists))
+snpf=$2     ## A snp file
+panel=$3    ## The number of SNP used in the panel
+inum=$SLURM_ARRAY_TASK_ID
+
+iid=($(awk -v inum="$inum" '{if (inum == $1) print $2}' ${listf}))              ## Individual ID
+lid=($(awk -v inum="$inum" '{if (inum == $1 && NF == 5) print $5}' ${listf}))   ## Library ID (if exists)
+pop=($(awk -v inum="$inum" '{if (inum == $1) print $4}' ${listf}))              ## Population
+bamf=($(awk -v inum="$inum" '{if (inum == $1) print $3}' ${listf}))             ## BAM file path
+
+mkdir -p ./${iid}/; cd ./${iid}/
+
+if [ -n "$lid" ]; then
+    ## Sex determination
+    aC=$(samtools coverage -H -r 13 ${bamf} | awk '{print $7}')
+    xC=$(samtools coverage -H -r X ${bamf} | awk '{print $7}')
+
+    sex=$(awk -v x="$xC" -v a="$aC" '
+        BEGIN {
+            ratio = (a > 0) ? x/a : 0
+            if (ratio > 0.7)      print "F"
+            else if (ratio > 0.3) print "M"
+            else                  print "U"
+        }'
+    )
+
+    echo ${lid} ${sex} ${pop} | awk '{OFS="\t"} {print $1,$2,$3}' > ${lid}.ind
+
+    ## Count the number and proportion of SNPs typed
+    nsnps=($(wc -l ${snpf}))
+    echo -e 'LID\tnCovered\tpCovered\taC\txC' > ${lid}.${panel}.cov.txt
+    tnum1=($(awk '$1 != 9' ${lid}.geno | wc -l))
+    echo ${lid} ${tnum1} ${nsnps} ${aC} ${xC} | awk '{OFS="\t"} {print $1,$2,$2/$3,$4,$5}' >> ${lid}.${panel}.cov.txt
+
+else
+
+    ## Sex determination
+    aC=$(samtools coverage -H -r 13 ${bamf} | awk '{print $7}')
+    xC=$(samtools coverage -H -r X ${bamf} | awk '{print $7}')
+
+    sex=$(awk -v x="$xC" -v a="$aC" '
+        BEGIN {
+            ratio = (a > 0) ? x/a : 0
+            if (ratio > 0.7)      print "F"
+            else if (ratio > 0.3) print "M"
+            else                  print "U"
+        }'
+    )
+
+    echo ${iid} ${sex} ${pop} | awk '{OFS="\t"} {print $1,$2,$3}' > ${iid}.ind
+    
+    ## Count the number and proportion of SNPs typed
+    nsnps=($(wc -l ${snpf}))
+    echo -e 'IID\tnCovered\tpCovered\taC\txC' > ${iid}.${panel}.cov.txt
+    tnum1=($(awk '$1 != 9' ${iid}.geno | wc -l))
+    echo ${iid} ${tnum1} ${nsnps} ${aC} ${xC} | awk '{OFS="\t"} {print $1,$2,$2/$3,$4,$5}' >> ${iid}.${panel}.cov.txt
+fi
+
+
+
+
+
+##########################################################################################
+## 2. Make mappability mask fasta file, apply the mappability filter and mac threshold  ##
+##    Try Heng Li's mappability filtering (SNPable) for the human reference             ##
+##    Follow the instruction from: http://lh3lh3.users.sourceforge.net/snpable.shtml    ##
+##########################################################################################
+## The scheme of the procedure is following behind.
+## 1. split the reference genome to 35-bp non-overlapping chunks
+## 2. map the chunks as short read to the reference 
+## 3. score the mapping quality for read (whether it does be mapped to the same location or not). c=0~3. 35bp share same score.
+## 4. we will use only regions of which score c=3, so we will make bed file for marking these regions. 
+
+cd /home/References/Muskox/O.moschatus_RAN27_v1.0/
+
+mkdir -p ./mappability/; cd ./mappability/
+
+pt1=($(pwd)"/")
+refm="/home/References/Muskox/O.moschatus_RAN27_v1.0/RAN27_v1.0.fa"     ## reference fasta file
+scf1=${pt1}"bwa_220818.sh"
+of1="RAN27_v1.0_mask_35_50"  ## Mappability masked fasta file
+tn1="temp1_"${of1}
+
+## Split the reference genome to 35-bp non-overlapping chunks
+splitfa ${refm} 35 | split -d -a 2 --numeric-suffixes=1 -l 20000000 \
+    --filter='gzip > $FILE.gz' - ${tn1}_
+
+idnmax=($(ls ${tn1}_*.gz | wc -l))
+nperrun=9
+
+## Run the job as a job array
+sbatch --array=1-${idnmax}%${nperrun} -c 12 --mem 15000 -p amd --wrap=${scf1}" "${tn1}" "${refm}
+
+## Crate raw mask file
+## rewrite gen_raw_mask.pl because it generate one character for 35 bp. So I multiply 35 times.
+gzip -dc ${tn1}_??.sam.gz | /opt/ohpc/pub/apps/seqability/seqbility-20091110/gen_raw_mask.pl > ${tn1}_1.fa 
+
+## Create the final mask file with threshold 0.5 (-r 0.5)
+gen_mask -l 35 -r 0.5 ${tn1}_1.fa > ${tn1}_2.fa
+
+## Move the final file
+mv ${tn1}_2.fa ${of1}.fa
+
+
+############################################
+## Save the following as "bwa_220818.sh"  ##
+
+#!/bin/bash
+
+fn1=$1  ## File name prefix
+ref=$2  ## reference
+
+inum=$SLURM_ARRAY_TASK_ID
+
+if [ "$inum" -lt 10 ]; then lnum="0"${inum}; else lnum=${inum}; fi
+
+fn2=${fn1}"_"${lnum}
+
+bwa aln -t 8 -R 1000000 -O 3 -E 3 -f ${fn2}.sai ${ref} ${fn2}.gz
+
+bwa samse ${ref} ${fn2}.sai ${fn2}.gz | gzip > ${fn2}.sam.gz
+
+
+####################################
+## 5. make mappability mask bed file
+
+out1="/home/References/Muskox/O.moschatus_RAN27_v1.0/mappability/RAN27_v1.0_{}.mask.bed.gz"     ## mappability mask bed file
+scf2=${pt1}"makeMappabilityMask.py"
+
+${scf2} ${of1}.fa ${out1}
+
+
+#########################################################
+## Save the following script as makeMappabilityMask.py ##
+
+#!/usr/bin/env python
+
+import gzip
+import sys
+
+INPUT = sys.argv[1]
+OUTPUT= sys.argv[2]
+
+class MaskGenerator:
+  def __init__(self, filename, chr):
+    self.lastCalledPos = -1
+    self.lastStartPos = -1
+    sys.stderr.write("making mask {}\n".format(filename))
+    self.file = gzip.open(filename, "w")
+    self.chr = chr
+
+  # assume 1-based coordinate, output in bed format
+  def addCalledPosition(self, pos):
+    if self.lastCalledPos == -1:
+      self.lastCalledPos = pos
+      self.lastStartPos = pos
+    elif pos == self.lastCalledPos + 1:
+      self.lastCalledPos = pos
+    else:
+      self.file.write("{}\t{}\t{}\n".format(self.chr, self.lastStartPos - 1, self.lastCalledPos).encode())
+      self.lastStartPos = pos
+      self.lastCalledPos = pos
+
+with open(INPUT, "r") as f:
+  for line in f:
+    if line.startswith('>'):
+      chr = line.split()[0][1:]
+      mask = MaskGenerator(OUTPUT.format(chr), chr)
+      pos = 0
+      continue
+    for c in line.strip():
+      pos += 1
+      if pos % 1000000 == 0:
+        sys.stderr.write("processing pos:{}\n".format(pos))
+      if c == "3":
+        mask.addCalledPosition(pos)
+
+
+
+####################################################################
+## 6. return to pseudohaploid genotypes and apply mappability filter
+
+cd /home/projects1/UmingmakMuskox/genotypes/
+
+cd ./251120_WGS_REF_EL012_Muskox/     ## Change directory with the same name of combinedVCFs
+pt1=($(pwd)"/")
+
+## Mappability filter with bed file
+fn0=${pt1}"WGS.REF.EL012.Muskox"
+fn1=${pt1}"WGS.REF.GR.Muskox"
+
+snpf=${pt1}"WGS.REF.EL012.Muskox.filtered.snp"
+
+## Make bed file with snp file
+## $1 : chr , $2 : pos-1, $3 : pos
+msk="/home/References/Muskox/O.moschatus_RAN27_v1.0/mappability/RAN27_v1.0.mappability.mask.bed"  ## use mask bed file from msmc analysis
+awk '{OFS="\t"}{print $2,$4-1,$4}' ${snpf} | gzip > ${fn0}.bed.gz
+
+## Find overlapped region with bedtools, resulting 3,889,764 SNPs
+bedtools intersect -a ${msk} -b ${fn0}.bed.gz | awk '{print $1":"$3}' >> ${fn0}.mappable.snp.txt
+fgrep -wf ${fn0}.mappable.snp.txt ${snpf} > ${fn0}.mappable.snp
+
+## Filter geno and snp files based on mappability
+genf=${fn1}.geno
+paste ${snpf} ${genf} | fgrep -wf ${fn0}.mappable.snp.txt - | awk '{print $7}' > ${fn1}.mappable.geno
+
+
+## GR included
+## Trim geno and snp files with mac > 2, missing < 20% (141 inds without takin), resulting 2,316,719 SNPs
+tn1="temp_"
+cat ${fn1}.mappable.geno | cut -c 1-141 | \
+    awk '{count0 = gsub(/0/, "&"); count2 = gsub(/2/, "&"); count9 = gsub(/9/, "&"); print count0, count2, count9}' > ${tn1}"geno_count_0"
+paste ${fn1}.mappable.geno ${tn1}"geno_count_0" > ${tn1}"geno_count"
+paste ${fn0}.mappable.snp ${tn1}"geno_count" > ${tn1}"geno_snp_allfiles"
+cat ${tn1}"geno_count" | awk '{if ($2 > 2 && $3 > 2 && $4 <= 28) print $1}' > ${fn1}.mappable.filtered.geno
+cat ${tn1}"geno_snp_allfiles" | awk '{OFS="\t"} {if ($8 > 2 && $9 > 2 && $10 <= 28) print $1, $2, $3, $4, $5, $6}' > ${fn1}.mappable.filtered.snp
+rm temp_*

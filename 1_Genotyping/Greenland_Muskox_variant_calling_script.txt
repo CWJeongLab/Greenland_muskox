@@ -134,16 +134,17 @@ sbatch --array=${ary} -c 8 --mem 20000 -J HapCall -p amd -w node09 --wrap=${scf1
 cd /home/projects1/UmingmakMuskox/CombinedVCFs/
 
 pt1=($(pwd)"/")
-scf2=${pt1}"Run_combine_genotype_gVCFs_250625.sh"
-listf=${pt1}"BAM_VCF_list_250625.txt"
+scf2=${pt1}"Run_combine_genotype_gVCFs_251120.sh"
+lst1=${pt1}"BAM_VCF_list_251120.txt"
+
 reff="/data2/projects1/Muskox/DataProcessing/Muskox_ref_list_250519.txt"
 
 ## Run parallel jobs by chromosome
-sbatch --array=1-23%2 -J combineGVCFs -c 8 --mem 20000 -p amd -w node10 --wrap=${scf2}" "${listf}" "${reff}
+sbatch --array=17-23 -J combineGVCFs -c 8 --mem 20000 -p amd -w node10 --wrap=${scf2}" "${lst1}" "${reff}
 
 
 ##################################################################
-## Save the following as "Run_combine_genotype_gVCFs_250625.sh" ##
+## Save the following as "Run_combine_genotype_gVCFs_251120.sh" ##
 
 #!/bin/bash
 
@@ -165,7 +166,7 @@ while read -r iid vcfdir; do
     vcfstr+=" -V "${invcf}
 done < <(cat ${listf} | awk '{print $2, $4}')
 
-mkdir -p ./250625_WGS_REF_Muskox/; cd ./250625_WGS_REF_Muskox/
+mkdir -p ./251120_WGS_REF_EL012_Muskox/; cd ./251120_WGS_REF_EL012_Muskox/
 
 ## Run CombineGVCFs to merge all GVCFs into a single file
 ${GATKstr} CombineGVCFs -R ${ref} ${vcfstr} -O ${multigvcf}.g.vcf.gz
@@ -173,61 +174,6 @@ ${GATKstr} CombineGVCFs -R ${ref} ${vcfstr} -O ${multigvcf}.g.vcf.gz
 ## Run GenotypeGVCFs to create variant calls
 ${GATKstr} GenotypeGVCFs -R ${ref} -V ${multigvcf}.g.vcf.gz -O ${multigvcf}.vcf.gz
 
-
-
-##############################################################
-## 2-2. Run CombineGVCFs to merge GVCFs into a single file  ##
-##      and GenotypeGVCFs to perform joint genotyping       ##
-##############################################################
-
-cd /home/projects1/UmingmakMuskox/CombinedVCFs/
-
-pt1=($(pwd)"/")
-scf2=${pt1}"Run_combine_genotype_gVCFs_250821.sh"
-lst1=${pt1}"BAM_VCF_list_250625.txt"
-lst2=${pt1}"BAM_VCF_list_250821.txt"
-
-reff="/data2/projects1/Muskox/DataProcessing/Muskox_ref_list_250519.txt"
-
-## Run parallel jobs by chromosome
-sbatch --array=17-23 -J combineGVCFs -c 8 --mem 20000 -p amd -w node10 --wrap=${scf2}" "${lst1}" "${lst2}" "${reff}
-
-
-##################################################################
-## Save the following as "Run_combine_genotype_gVCFs_250821.sh" ##
-
-#!/bin/bash
-
-lst1=$1    ## A list of samples to be processed (cn, iid, bamdir, vcfdir, pop)
-lst2=$2    ## A list of samples to be processed (cn, mid, bamdir, vcfdir, pop)
-reff=$3    ## the reference genome list file
-inum=$SLURM_ARRAY_TASK_ID
-
-refn="Muskox"
-ref=($(awk -v refn="$refn" '{if ($1 == refn) print $2}' ${reff}))
-
-multigvcf="WGS.REF.GR."${refn}".mapped.rmdup.q30."${inum}
-
-GATKstr="java -Xmx12G -jar /opt/ohpc/pub/apps/gatk/gatk-4.1.2.0/gatk-package-4.1.2.0-local.jar"
-
-## Create a string of input vcf for the combineGVCFs module
-vcfstr=""
-while read -r iid vcfdir; do
-    invcf=($(ls ${vcfdir}/${iid}/${iid}.${refn}.mapped.rmdup.q30.${inum}.g.vcf.gz))
-    vcfstr+=" -V "${invcf}
-done < <(cat ${lst1} | awk '{print $2, $4}')
-while read -r mid vcfdir; do
-    invcf=($(ls ${vcfdir}/${mid}.${refn}/${mid}.${refn}.${inum}.g.vcf.gz))
-    vcfstr+=" -V "${invcf}
-done < <(cat ${lst2} | awk '{print $2, $4}')
-
-mkdir -p ./250821_WGS_REF_GR_Muskox/; cd ./250821_WGS_REF_GR_Muskox/
-
-## Run CombineGVCFs to merge all GVCFs into a single file
-${GATKstr} CombineGVCFs -R ${ref} ${vcfstr} -O ${multigvcf}.g.vcf.gz
-
-## Run GenotypeGVCFs to create variant calls
-${GATKstr} GenotypeGVCFs -R ${ref} -V ${multigvcf}.g.vcf.gz -O ${multigvcf}.vcf.gz
 
 
 
@@ -364,10 +310,10 @@ dev.off()
 ## 3-3. Filter variants according to thresholds using VariantsFiltration   ##
 #############################################################################
 
-cd /home/projects1/Muskox/combinedVCFs/220711_SKZ_Muskox/VCF_filtering/
+cd /home/projects1/Muskox/combinedVCFs/251120_WGS_REF_EL012_Muskox/VCF_filtering/
 
 pt1=($(pwd)"/")
-scf2=($(realpath ../../Variants_filtration_script_250627.sh))
+scf2=($(realpath ../../Variants_filtration_script_251124.sh))
 fn1=${pt1}"WGS.REF.Muskox"
 of1="WGS.REF.Muskox.filter_marked"
 of2="WGS.REF.Muskox.filter_passed"
@@ -382,7 +328,7 @@ rm slurm-*
 
 
 #####################################################################
-## Save the following as "Variants_filtration_script_250627.sh"    ##
+## Save the following as "Variants_filtration_script_251124.sh"    ##
 
 #!/bin/bash
 
@@ -397,9 +343,9 @@ ovcf1=${of1}"."${inum}".vcf.gz"
 ovcf2=${of2}"."${inum}".vcf.gz"
 
 ## Filter variants according to thresholds
-## Median DP is about 1182
+## Median DP is about 1192
 gatk --java-options '-Xmx12G' VariantFiltration -V ${invcf} -R ${refm} \
-     -filter "DP < 200.0 || DP > 6000.0 || QD < 2.0 || SOR > 3.0 || FS > 60.0 || MQ < 40.0 || MQRankSum < -12.5 || ReadPosRankSum < -8.0 || ExcessHet > 10.0" \
+     -filter "DP < 200.0 || DP > 6000.0 || QD < 2.0 || SOR > 3.0 || FS > 60.0 || MQ < 35.0 || MQRankSum < -12.5 || ReadPosRankSum < -8.0 || ExcessHet > 10.0" \
      --filter-name "LowQual" -O ${ovcf1}
 
 ## Keep the passed variants only
