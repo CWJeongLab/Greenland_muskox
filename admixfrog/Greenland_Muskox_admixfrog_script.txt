@@ -1,0 +1,635 @@
+##############################################################################################
+## 1. Prepare vcf (including takin as outgroup)                                             ##
+##    In the original description, the target would be a modern human,                      ##
+##    and the sources would be modern humans (AFR), Neandertals (NEA) or Denisovans (DEN).  ##
+##    In this case, I set the target as CaI, and the sources are CaM (BGM) and Gr (GRL).    ##
+##############################################################################################
+
+cd /home/projects1/UmingmakMuskox/analysis/admixfrog/
+mkdir -p admixfrog_250821; cd admixfrog_250821 
+mkdir -p vcf data 
+
+pt1=($(pwd)"/")
+listf1=${pt1}"muskox_list.txt"
+listf2=${pt1}"takin_list.txt"
+fn1="/home/projects1/UmingmakMuskox/CombinedVCFs/250821_WGS_REF_GR_Muskox/VCF_filtering/WGS.REF.GR.Muskox.filter_passed"  ## muskox vcf prefix
+mask="/home/References/Muskox/O.moschatus_RAN27_v1.0/mappability/RAN27_v1.0.mappability.mask.bed"           ## mappability mask bed file
+ref="/home/References/Muskox/O.moschatus_RAN27_v1.0/RAN27_v1.0.fa"
+
+of1=${pt1}"vcf/reference"
+scf1=${pt1}"vcf_extract_merge.sh" 
+
+## run by chromosome (it takes only a few minutes)
+idnmax=23   # chromosome number
+nperrun=12
+
+CMD=${scf1}" "${fn1}" "${of1}" "${listf1}" "${listf2}" "${mask}" "${ref}
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 20000 -J admixfrog -p amd --wrap="$CMD"
+
+
+##############################################################
+#### write the following script as "vcf_extract_merge.sh" ####
+
+#!/bin/bash
+
+fn1=$1
+of1=$2
+lst1=$3   # modern sample
+listf=$4  # outgroup takin sample
+mask=$5
+ref=$6
+
+chr=$SLURM_ARRAY_TASK_ID
+
+tn1=${of1}"_temp"
+
+## extract modern samples & masked
+strs=""; snum=0; while read iid; do if [[ "$snum" == 0 ]]; then strs=${iid}; else strs+=","${iid}; fi ; snum+=1; done < <(cut -f1 ${lst1}) # sample
+
+bcftools view -Oz -s ${strs} ${fn1}.${chr}.vcf.gz -R ${mask} -o ${tn1}.${chr}.vcf.gz
+bcftools index -t ${tn1}.${chr}.vcf.gz
+
+## genotyping takin genomes using bcftools mpileup & call
+vcfstr="${tn1}.${chr}.vcf.gz"
+while read iid ibam; do
+    bcftools mpileup -q 30 -Q 30 -C 50 -R ${tn1}.${chr}.vcf.gz -f ${ref} ${ibam} -Ou | bcftools call -c -V indels -Oz -o ./vcf/temp_${iid}.${chr}.vcf.gz
+    bcftools index -t ./vcf/temp_${iid}.${chr}.vcf.gz
+    vcfstr+=" ./vcf/temp_${iid}.${chr}.vcf.gz"
+done < <(cat ${listf} | awk '{print $1, $3}')
+
+bcftools merge ${vcfstr} -Oz -o ${of1}.${chr}.vcf.gz
+bcftools index -t ${of1}.${chr}.vcf.gz
+
+
+
+
+
+##################################
+## 2. Prepare reference files   ##
+##################################
+
+cd /home/projects1/UmingmakMuskox/analysis/admixfrog/admixfrog_250821
+mkdir -p res
+
+pt1=($(pwd)"/")
+listf1=${pt1}"muskox_list.txt"
+listf2=${pt1}"takin_list.txt"
+fn1=${pt1}"vcf/reference"
+# map1="/home/References/Cattle/map/ARS_UCD1.2.map.chr" ## column name $1=Physical_Pos, $2=AA_Map, average 0.98cM/Mbp
+of1=${pt1}"res/reference"
+lst1=${pt1}"data/pops.yaml"
+scf1=${pt1}"make_admixfrog_reference.sh"
+
+## population info file
+echo "sampleset:" > ${lst1}
+
+for grp in BGM GRL; do
+    echo "  "${grp}":" >> ${lst1}
+    while read iid; do
+        echo -e "    - "${iid} >> ${lst1}
+    done < <(grep -w ${grp} ${listf1} | cut -f1)
+done
+
+for grp in TAK; do
+    echo "  "${grp}":" >> ${lst1}
+    while read iid; do
+        echo -e "    - "${iid} >> ${lst1}
+    done < <(grep -w ${grp} ${listf2} | cut -f1)
+done
+
+# pseudohaploid (low coverage & outgroup)
+echo "pseudo_haploid:" >> ${lst1}
+while read iid; do
+    echo -e "  - "${iid} >> ${lst1}
+done < <(awk '{print $1}' ${listf1} | tail -3)
+while read iid; do
+    echo -e "  - "${iid} >> ${lst1}
+done < <(awk '{print $1}' ${listf2})
+
+
+## run by chromosome (it takes less than a minute)
+idnmax=23
+nperrun=15
+
+CMD=${scf1}" "${fn1}" "${of1}" "${lst1}
+sbatch --array=1-${idnmax}%${nperrun} -p amd -c 8 --mem 15000 -J admixfrog --wrap="$CMD"
+
+## After run, combine them
+xzcat ${of1}.1.xz > ${of1}.all
+
+for chr in {2..23}; do 
+    xzcat ${of1}.${chr}.xz | tail -n +2 >> ${of1}.all 
+done 
+
+xz ${of1}.all 
+
+
+#####################################################################
+#### write the following script as "make_admixfrog_reference.sh" ####
+
+#!/bin/bash
+
+fn1=$1   # vcf
+of1=$2
+lst1=$3  # pop info yaml file
+
+chr=$SLURM_ARRAY_TASK_ID
+
+## make reference (autosome)
+/home/donghee_kim/.conda/envs/admixfrog/bin/admixfrog-ref --out ${of1}.${chr}.xz --vcf-ref ${fn1}.${chr}.vcf.gz \
+    --state-file ${lst1} \
+    --states BGM GRL TAK \
+    --chroms ${chr}
+
+
+
+
+
+
+##########################
+## 3. Run admixfrog     ##
+##########################
+
+cd /home/projects1/UmingmakMuskox/analysis/admixfrog/admixfrog_250821
+mkdir -p target run
+
+pt1=($(pwd)"/")
+fn1=${pt1}"res/reference.all.xz"
+listf=${pt1}"CaI_bam_list.txt"
+listf=${pt1}"aUM_bam_list.txt"
+listf=${pt1}"UM_bam_list.txt"
+
+scf1=${pt1}"run_admixfrog.sh"
+# scf2=${pt1}"estimate_admixture_date.py"
+
+## run
+idnmax=($(wc -l ${listf}))
+nperrun=24
+
+CMD=${scf1}" "${fn1}" "${listf}
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 15000 -p amd -J admixfrog --wrap="$CMD"
+
+
+## summarize 
+of1=${pt1}"CaI_introgressed_segments_summary.txt"
+echo "IID Group type homo(cM) het(cM) total_length_auto mean_length_auto total_length_X mean_length_X" | sed s/" "/"\t"/g > ${of1}
+
+while read iid grp; do 
+    tfn1=${pt1}"run/"${iid}"/"${iid}".rle.xz"
+    # Canadian mainland
+    xzcat ${tfn1}  | sed s/","/"\t"/g | awk '$5~/BGM/ && $(NF-2) > 0.1'  | \
+    awk -v iid=$iid -v grp=$grp '{OFS="\t"}BEGIN{s1=0;s2=0;s3=0;s4=0;n1=0;n2=0}{ if ($6=="homo") {
+        s1+=$(NF-2) 
+        }  else if ($6=="het") { 
+            s2+=$(NF-2) 
+    } else if ($1!="X")  { 
+        s3 += $(NF-2)
+        n1 += 1 
+     } else { 
+        s4 += $(NF-2)
+        n2 += 1 
+     } }END{ if (n1>0 && n2>0) { 
+         print iid, grp, "BGM", s1, s2, s3, s3/n1, s4, s4/n2
+         } else if (n1>0) { 
+         print iid, grp, "BGM", s1, s2, s3, s3/n1, 0, 0 
+         } else { 
+         print iid, grp, "BGM", 0, 0, 0, 0, 0, 0              
+         } }' >> ${of1}
+
+    # Greenland
+    xzcat ${tfn1}  | sed s/","/"\t"/g | awk '$5~/GRL/ && $(NF-2) > 0.1'  | \
+    awk -v iid=$iid -v grp=$grp '{OFS="\t"}BEGIN{s1=0;s2=0;s3=0;s4=0;n1=0;n2=0}{ if ($6=="homo") {
+        s1+=$(NF-2) 
+        }  else if ($6=="het") { 
+            s2+=$(NF-2) 
+    } else if ($1!="X")  { 
+        s3 += $(NF-2)
+        n1 += 1 
+     } else { 
+        s4 += $(NF-2)
+        n2 += 1 
+     } }END{ if (n1>0 && n2>0) { 
+         print iid, grp, "GRL", s1, s2, s3, s3/n1, s4, s4/n2
+         } else if (n1>0) { 
+         print iid, grp, "GRL", s1, s2, s3, s3/n1, 0, 0 
+         } else { 
+         print iid, grp, "GRL", 0, 0, 0, 0, 0, 0              
+         } }' >> ${of1}
+
+done < <(cat temp0)
+
+
+
+##########################################################
+#### write the following script as "run_admixfrog.sh" ####
+
+#!/bin/bash 
+
+fn1=$1    # vcf
+listf=$2  # sample list
+
+pt1=($(pwd)"/")
+inum=$SLURM_ARRAY_TASK_ID
+
+rid=($(awk -v inum=$inum '{ if (NR==inum) print $1}' ${listf}))
+ibam=($(awk -v inum=$inum '{ if (NR==inum) print $2}' ${listf}))
+
+## make input (target)
+mkdir -p target/${rid}
+of1=${pt1}"target/"${rid}"/"${rid}".in.xz"
+/home/donghee_kim/.conda/envs/admixfrog/bin/admixfrog-bam --bam ${ibam} --ref ${fn1} --chroms 1-23 --out ${of1}
+
+## run admixfrog (first, autosome)
+mkdir -p run/${rid}
+of2=${pt1}"run/"${rid}"/"${rid}
+/home/donghee_kim/.conda/envs/admixfrog/bin/admixfrog --infile ${of1} --ref ${fn1} --out ${of2} \
+     -b 3000 --states BGM GRL --dont-est-contamination --cont-id GRL --ancestral TAK
+
+
+
+######################
+#### plot using R ####
+
+~/.conda/envs/Admixtools/bin/R
+
+library(ggplot2)
+library(dplyr)
+
+df <- read.table("CaI_introgressed_segments_summary_nohybrid.txt", header = TRUE)
+
+alen <- 2453    # total length of autosomes
+df$autosome_prop <- df$total_length_auto / alen
+
+# Define color
+grpvec <- sort(unique(df$Group))
+df$Group <- factor(df$Group, levels = grpvec)
+df <- df[order(df$Group), ]
+
+# acols <- c("red", "green", "yellow", "blue", "orange", "purple", "cyan", "magenta", 
+#            "darkolivegreen1", "pink", "aquamarine4", "lavender", "brown", "beige", 
+#            "aquamarine1", "maroon", "darkgoldenrod2", "coral", "navy", "grey", "black")
+
+acols <- c("burlywood2", "darkorange", "firebrick")    # aUM, CaIN, CaIS
+colvec <- rep(acols, 10)[1:length(grpvec)]
+
+# plot
+plot_group <- function(data, x, y, group, xlab, ylab, titles) {
+  ggplot(data, aes(x = .data[[x]], y = .data[[y]], fill = .data[[group]])) +
+    scale_fill_manual(values = colvec, breaks = grpvec) +
+    labs(x = xlab, y = ylab, title = titles) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 12, hjust = 0.5, face = "bold"),
+      axis.text.x = element_text(angle = 60, hjust = 1, vjust = 1, color = "black", size = 12),
+      axis.text = element_text(size = 10, color = "black"),
+      axis.title = element_text(size = 12, face = "bold"),
+      legend.position = "none"
+    )
+}
+
+# Create the plot
+pdf(file = "CaI_segment_summary_all_260917.pdf", width = 4, height = 5)
+
+# Define types for plot
+typ_vec <- c("BGM", "GRL")
+typn_vec <- c("Canadian mainland (BGM)", "Greenland (GRL)")
+
+# Create each boxplot by type
+for (t1 in seq_along(typ_vec)) {
+  typ <- typ_vec[t1]
+  typ_name <- typn_vec[t1]
+  df2 <- subset(df, type == typ)
+
+  p <- plot_group(df2,
+                  x = "Group",
+                  y = "autosome_prop",
+                  group = "Group",
+                  xlab = "",
+                  ylab = "Introgressed segment proportion (auto)",
+                  titles = typ_name) +
+       geom_boxplot() +
+       geom_jitter(size = 1)
+
+  print(p)
+}
+
+dev.off()
+
+
+
+
+
+##################################################
+## 4. admixture dating using segment lengths    ##
+##################################################
+
+cd /home/projects1/UmingmakMuskox/analysis/admixfrog/admixfrog_250821/
+mkdir -p segments
+
+pt1=($(pwd)"/")
+listf=${pt1}"CaI_bam_list.txt"
+scf1=${pt1}"estimate_admixture_date.R"
+ref="/home/References/Muskox/O.moschatus_RAN27_v1.0/RAN27_v1.0.fa"
+
+# len=($(awk '{ if ($1 >= 1 && $1 <= 23) sum += $2} END {print sum}' ${ref}.fai)) 
+
+## summarize proportion
+of1=${pt1}"Muskox_CaI_admixture_proportion_260118.txt" 
+
+echo "IID Group alpha_BGM alpha_GRL" | sed s/" "/"\t"/g > ${of1}
+
+while read iid grp; do  
+    tfn1=${pt1}"run/"${iid}"/"${iid}".res.xz"
+    xzcat ${tfn1} | tail -n +2 | sed s/","/"\t"/g | awk '$5>16'| awk -v iid=$iid -v grp=$grp '{OFS="\t"} \
+    { if ($1=="BGM") a1 += $5; else a2 += $5 } \
+    END {sum=a1+a2; print iid, grp, a1/sum, a2/sum}' >> ${of1} 
+done < <(cat temp0)
+
+
+## estimate date
+of2=${pt1}"Muskox_CaI_admixture_dates_260917.pdf"
+tpdfs=""
+snum=2
+for typ in BGM GRL; do 
+    let snum+=1
+    while read iid grp; do 
+        tfn1=${pt1}"run/"${iid}"/"${iid}".rle.xz"
+        tfn2=${pt1}"segments/"${iid}"/"${iid}"."${typ}
+        
+        mkdir -p ${pt1}"segments/"${iid}
+        alpha=($(awk -v iid=$iid '$1==iid' ${of1} | cut -f${snum}))
+        xzcat ${tfn1} | awk -F"," -v typ=$typ '{ if ($5==typ && $6=="state" && $(NF-2) > 0.1) print $(NF-2)}' > ${tfn2}.txt
+        ${scf1} ${tfn2}.txt ${alpha} 0.1 ${iid} ${tfn2}
+        tpdfs+=" "${tfn2}"_segment_lengths.pdf"
+        echo ${iid} ${typ} "finished."     
+    done < <(cat temp3)
+done 
+
+pdfunite ${tpdfs} ${of2} 
+
+
+
+###################################################################
+##### save the following script as "estimate_admixture_date.R" ####
+
+#!/usr/bin/env Rscript
+
+args <- commandArgs(trailingOnly = TRUE)
+if (length(args) < 4) {
+  stop("Usage: Rscript estimate_admixture_time.R <segment_file> <alpha> <min_length_cM> <sample_id>")
+}
+
+# Parse arguments
+segment_file <- args[1]
+alpha <- as.numeric(args[2])
+min_cM <- as.numeric(args[3])
+sample_id <- args[4]
+of1 <- args[5]
+
+# Load data
+lengths_cM <- scan(segment_file, what = numeric(), quiet = TRUE)
+lengths_cM <- lengths_cM[lengths_cM >= min_cM]
+lengths_M <- lengths_cM / 100
+
+if (length(lengths_M) < 10) {
+  stop("Too few segments after filtering")
+}
+
+# Estimate admixture time
+mean_len <- mean(lengths_M)
+lambda_hat <- 1 / (mean_len - min_cM/100)
+t_hat <- lambda_hat / (1-alpha)
+
+# Save table
+out_table <- data.frame(
+  sample_id = sample_id,
+  input_file = basename(segment_file),
+  estimated_generations = round(t_hat, 2),
+  mean_length_cM = mean(lengths_cM),
+  alpha = alpha,
+  min_cM = min_cM,
+  n_segments = length(lengths_M)
+)
+write.table(out_table, paste0(of1, "_estimate.txt"), row.names = FALSE, quote = FALSE)
+
+# Plot
+pdf(paste0(of1, "_segment_lengths.pdf"), width = 8, height = 5)
+hist(lengths_cM, breaks = 50, probability = TRUE,
+     col = "skyblue", border = "gray30",
+     main = paste0(sample_id, " - Estimated admixture time: ", round(t_hat, 1), " generations"),
+     xlab = "Segment length (cM)", ylab = "Density")
+
+x_vals <- seq(min(lengths_cM), max(lengths_cM), length.out = 50)
+lambda <- 1 / ( (1-alpha) * (t_hat) )
+pdf_vals <- (1/lambda)/100 * exp(- (1/lambda) * ( (x_vals -min_cM)/100))
+lines(x_vals, pdf_vals, col = "red", lwd = 2)
+#legend("topright", legend = paste0("λ = ", round(lambda, 2), ", α = ", alpha), col = "red", lwd = 2)
+dev.off()
+
+cat("[✓] Finished.\n")
+cat("[✓] Estimated admixture time =", round(t_hat, 2), "generations\n")
+cat("[✓] Output written to:", paste0(sample_id, "_estimate.csv"), "and plot\n")
+
+
+
+
+
+
+
+######################################################################
+## 5. Define Canadian mainland and Greenland introgressed segments  ##
+######################################################################
+
+cd /home/projects1/UmingmakMuskox/analysis/admixfrog/admixfrog_250821/
+mkdir -p segments
+
+pt1=($(pwd)"/")
+
+while read iid grp; do
+    mkdir -p segments/${iid}
+
+    tfn1=${pt1}"run/"${iid}"/"${iid}".rle.xz" 
+
+    of1=${pt1}"segments/"${iid}"/"${iid}".GRL.bed"  # $1=chr, $2=start (pos), $3=end (pos_end), $4=length (pos_len)
+    of2=${pt1}"segments/"${iid}"/"${iid}".BGM.bed"
+
+    xzcat ${tfn1} | sed s/","/"\t"/g | awk '{OFS="\t"} {if ($5=="GRL" && $6=="homo" && $(NF-2) > 0.1) print $1,$8,$11,$15}' | sort -nk1 -nk2 > ${of1}  # putative Greenland 
+    xzcat ${tfn1} | sed s/","/"\t"/g | awk '{OFS="\t"} {if ($5 ~ /BGM/ && $6=="state" && $(NF-2) > 0.1) print $1,$8,$11,$15}' | sort -nk1 -nk2 > ${of2}  # putative mainland introgressed
+
+    echo $iid "finished"
+
+done < <(cat temp2)
+
+
+
+
+
+
+##########################################################
+## 6. mask genotypes (with mappability filter; 2316K)   ##
+##########################################################
+
+cd /home/projects1/UmingmakMuskox/analysis/admixfrog/admixfrog_250821/
+mkdir -p genotypes_mappable
+
+pt1=($(pwd)"/")
+snpf="/home/projects1/UmingmakMuskox/genotypes/251120_WGS_REF_EL012_Muskox/WGS.REF.GR.Muskox.mappable.filtered.snp"
+genf="/home/projects1/UmingmakMuskox/genotypes/251120_WGS_REF_EL012_Muskox/WGS.REF.GR.Muskox.mappable.filtered.geno"
+indf="/home/projects1/UmingmakMuskox/genotypes/251120_WGS_REF_EL012_Muskox/WGS.REF.GR.Muskox.ind"
+
+# extract genotypes
+while read iid grp; do  
+    bed1=${pt1}"segments/"${iid}"/"${iid}".GRL.bed"
+    bed2=${pt1}"segments/"${iid}"/"${iid}".BGM.bed"
+
+    # extract genotype
+    mkdir -p ./genotypes_mappable/${iid}/
+
+    # make geno bed file
+    num=$(awk -v iid=$iid '{if ($1==iid) print NR}' ${indf})
+    cat ${genf} | cut -c ${num} > ./genotypes_mappable/${iid}/${iid}.2316K.geno
+    paste ${snpf} ./genotypes_mappable/${iid}/${iid}.2316K.geno | awk '{OFS="\t"} {print $2,$4-1,$4,$7}' >  ./genotypes_mappable/${iid}/${iid}.geno.bed
+
+    # whole genome 
+    cut -f4 ./genotypes_mappable/${iid}/${iid}.geno.bed > ./genotypes_mappable/${iid}/${iid}.whole.geno
+
+    # mask Greenland tract 
+    bedtools intersect -c -a ./genotypes_mappable/${iid}/${iid}.geno.bed -b ${bed1} -wa | awk '{if ($5==1) print $4; else print 9}' > ./genotypes_mappable/${iid}/${iid}.GRL.geno
+
+    # mask mainland tract 
+    bedtools intersect -c -a ./genotypes_mappable/${iid}/${iid}.geno.bed -b ${bed2} -wa | awk '{if ($5==1) print $4; else print 9}' > ./genotypes_mappable/${iid}/${iid}.BGM.geno
+
+    echo ${num} ${iid}" is done."
+done < <(cat temp)
+
+
+## Combine genotypes
+of1=${pt1}"CaI.2316K.260115"
+of2=${pt1}"Muskox.admixfrog.260115"
+
+if [[ -f "$of1.ind" ]]; then rm ${of1}.ind; fi 
+genof=""
+while read iid sex grp; do 
+    echo -e ${iid}"_GRL\t"${sex}"\t"${iid}"_GRL" >> ${of1}.ind
+    echo -e ${iid}"_BGM\t"${sex}"\t"${iid}"_BGM" >> ${of1}.ind
+
+    genof+=" ./genotypes_mappable/${iid}/${iid}.GRL.geno"
+    genof+=" ./genotypes_mappable/${iid}/${iid}.BGM.geno"
+done < <(cat temp1)
+
+paste -d "" ${genof} > ${of1}.geno 
+
+## merge with previous geno files
+nauto=($(wc -l ${snpf}))
+
+cp ${snpf} ${of2}.snp
+
+# ind
+lst0="/home/projects1/UmingmakMuskox/analysis/SkovHMM/SkovHMM_250821/sample_info/CaI_ingroup_list.txt"
+if [[ -f "${of2}.ind" ]]; then rm ${of2}.ind; fi 
+while read iid pid; do 
+  nr=($(grep ${iid} ${lst0}|wc -l))
+  if [ "$nr" -gt 0 ]; then npid=${iid}; else npid=${pid}; fi 
+  echo -e ${iid}"\tU\t"${npid} >> temp.ind
+done < <(cut -f1,3 ${indf})
+
+cat temp.ind ${of1}.ind > ${of2}.ind
+
+head -n${nauto} ${of1}.geno | paste -d "" ${genf} - > ${of2}.geno
+
+
+## after f4 calculation, bring it back 
+if [[ -f "$of1.ind" ]]; then rm ${of1}.ind; fi 
+
+while read iid sex grp; do 
+    echo -e ${iid}"_GRL\t"${sex}"\t"${grp}"_GRL" >> ${of1}.ind
+    echo -e ${iid}"_BGM\t"${sex}"\t"${grp}"_BGM" >> ${of1}.ind
+
+    genof+=" ./genotypes_mappable/${iid}/${iid}.GRL.geno"
+    genof+=" ./genotypes_mappable/${iid}/${iid}.BGM.geno"
+done < <(cat temp1)
+
+cat ${indf} ${of1}.ind > ${of2}.ind
+
+
+
+################  R ##############################
+
+/home/donghee_kim/.conda/envs/Admixtools/bin/R
+
+rm = list()
+library(admixtools)
+library(tidyverse)
+library(gridExtra)
+
+lst0 <- read.table("/home/projects1/UmingmakMuskox/analysis/SkovHMM/SkovHMM_250821/sample_info/CaI_ingroup_list.txt", header=F, col.names=c("IID"))
+lst1 <- read.table("/home/projects1/UmingmakMuskox/analysis/admixfrog/admixfrog_250821/CaI.2316K.260115.ind", header=F, col.names=c("IID","BIO.SEX","PID"))
+fn1 <- "/home/projects1/UmingmakMuskox/analysis/admixfrog/admixfrog_250821/Muskox.admixfrog.260115"
+indf <- read.table("/home/projects1/UmingmakMuskox/genotypes/251120_WGS_REF_EL012_Muskox/WGS.REF.GR.Muskox.ind", header=F, col.names=c("IID","sex","PID") )
+
+
+## f4 
+pop1 <- "Tak"
+pop2 <- c("SibE_WI","CaMW_KU1","CaME_BL","GrEN_ZA","GrN_MS")
+pop3 <- "GrES_JA"
+pop4 <- c()
+for (i in 1:nrow(lst0)) {
+  iid <- lst0$IID[i]
+  pop4 <- c(pop4,paste0(iid), paste0(iid,"_GRL"), paste0(iid,"_BGM"))
+}
+
+df <- f4(fn1, pop1, pop2, pop3, pop4, auto_only = F, poly_only=F, blgsize=5e6)
+
+## write down f4 table
+table.name <- paste0("Muskox_CaI_admixfrog.f4.260115", ".txt")
+write.table(df, file=table.name, quote=F, sep="\t", row.names=F)
+
+# plot
+df <- read.table("Muskox_CaI_admixfrog.f4.260115.txt",header=T)
+
+df$IID <- str_split(df$pop4, "_", simplify = TRUE)[,1]
+df$Archaic <- str_split(df$pop4, "_", simplify = TRUE)[,2]
+df$Archaic <- gsub("human", "non-archaic", df$Archaic)
+df[df$Archaic=="",]$Archaic <- "whole genome"
+
+df$Sign <- "|Z|>3"
+df$Sign[df$z <= 3 & df$z >= -3] <- "|Z|<=3"
+
+df <- merge(df,indf,by="IID")
+df$PID <- str_split(df$PID, "_", simplify = TRUE)[,1]
+
+pdf.name <- paste0("Muskox_CaI_admixfrog.f4.260115", ".pdf")
+pdf(pdf.name, width=5, height=6, colormodel="cmyk")
+
+p2vec <- unique(df$pop2)
+for (i in 1:length(p2vec)) { 
+    # write f4  
+    xlabs <- ""
+    ylabs <- paste0("f4(Takin, ",p2vec[i], "; GrES_JA, X) (3.s.e.)" )
+    titles <- ""
+
+    # Create a bar plot with error bars using ggplot2
+    p1 <- ggplot(subset(df,pop2==p2vec[i]), aes(x=Archaic, y=est, color=PID, shape=Sign) ) +
+        geom_jitter(size=4, width=0.2) + 
+        geom_hline(yintercept=0, color="black", linetype="dashed", linewidth=1) +
+        scale_color_manual(values=c("green","blue")) +
+        #scale_shape_manual(values=c(22,25)) +
+
+    # Add labels and title
+    labs(x=xlabs,y=ylabs, title=titles )+
+
+    # Set theme and axis limits
+    theme_bw() +
+
+    # Change appearance of y-axis text
+    theme(axis.text.y=element_text(size=12, color="black"), 
+        axis.text.x=element_text(size=12, color="black", angle=45, vjust=0.5), 
+        axis.title.x= element_text(size=14, face="bold"),
+        axis.title.y= element_text(size=14, face="bold"),
+        plot.title = element_text(hjust = 0.5, size = 16, face = "bold"))
+
+    print(p1)
+}
+
+dev.off()
+
