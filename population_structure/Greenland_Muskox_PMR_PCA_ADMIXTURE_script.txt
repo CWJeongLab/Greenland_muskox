@@ -1,0 +1,154 @@
+##############################################################################################################
+## Population structure from WGS data (110 global WGS + 1 ancient Sib + 6 published REF + 13 outgroup TAK   ##
+##                                     + 9 SKZ + 10 MSS + 5 SRP)                                            ##
+##############################################################################################################
+
+################################################################
+## 1. Calculate missingness and pairwise mismatch rate        ##
+################################################################
+
+## WGS+REF+EL012 variant calling and pseudo-haploid pulldown with mappable filter (2316K)
+snpf="/home/projects1/UmingmakMuskox/genotypes/251120_WGS_REF_EL012_Muskox/WGS.REF.GR.Muskox.mappable.filtered.snp"
+genf="/home/projects1/UmingmakMuskox/genotypes/251120_WGS_REF_EL012_Muskox/WGS.REF.GR.Muskox.mappable.filtered.geno"
+indf="/home/projects1/UmingmakMuskox/genotypes/251120_WGS_REF_EL012_Muskox/WGS.REF.GR.Muskox.ind"
+
+## Reformat autosomal data for calculating pairwise mismatch rate (PMR)
+cd /home/projects1/UmingmakMuskox/analysis/structure/PMR_GR_260111/
+pt1=($(pwd)"/")
+
+tn1="PMR_GR.Muskox.filtered"
+cat ${genf} | sed 's/./& /g' > ${tn1}.geno
+cat ${indf} | awk '{OFS="\t"} {print $1,$2,$3}' > ${tn1}.ind
+
+## Calculate PMR for all pairs of individuals
+pmrscf=${pt1}"pmrcalc_script_200717.R"
+Rscript ${pmrscf} ${tn1}
+
+of1="WGS.GR.Muskox.filtered"
+echo 'PID1 ID1 PID2 ID2 nSNPs nmismatch pmismatch' | sed s/" "/"\t"/g > ${of1}.pmr.txt
+while read -r iid1 iid2 v3 v4 v5; do
+    pid1=($(awk -v iid1="$iid1" '{if ($1 == iid1) print $3}' ${indf}))
+    pid2=($(awk -v iid2="$iid2" '{if ($1 == iid2) print $3}' ${indf}))
+    echo ${pid1} ${iid1} ${pid2} ${iid2} ${v3} ${v4} ${v5} \
+    | awk '{printf "%s %s %s %s %d %d %.5f\n", $1,$2,$3,$4,$5,$6,$7}' | sed s/" "/"\t"/g >> ${of1}.pmr.txt
+done < ${tn1}_out
+
+
+
+
+
+##############################################
+## 2. Find population structure from PCA    ##
+##############################################
+
+## run PCA with smartpca
+cd /home/projects1/UmingmakMuskox/analysis/structure/
+mkdir -p ./PCA_GR_260111/; cd ./PCA_GR_260111/
+
+## WGS+REF+EL012 variant calling and pseudo-haploid pulldown with mappable filter (2316K)
+snpf="/home/projects1/UmingmakMuskox/genotypes/251120_WGS_REF_EL012_Muskox/WGS.REF.GR.Muskox.mappable.filtered.snp"
+genf="/home/projects1/UmingmakMuskox/genotypes/251120_WGS_REF_EL012_Muskox/WGS.REF.GR.Muskox.mappable.filtered.geno"
+indf="/home/projects1/UmingmakMuskox/genotypes/251120_WGS_REF_EL012_Muskox/WGS.REF.GR.Muskox.ind"
+
+pt1=($(pwd)"/")
+
+of1="PCA_GR_260111"
+parf1=${of1}".par"
+
+## All data of WGS (excluding outgroup / siberian sample)
+cat ${indf} | awk '{print $3}' | sort | uniq > ${of1}.pop1
+cat ${indf} | awk '{print $3}' | sort | uniq | grep -v Tak > ${of1}.pop2
+cat ${indf} | awk '{print $3}' | sort | uniq | grep -v Tak  | grep -v SibE > ${of1}.pop3
+
+## Make parameter file
+for i in $(seq 1 3); do
+    echo "genotypename: "${genf} > ${parf1}${i}
+    echo "snpname: "${snpf} >> ${parf1}${i}
+    echo "indivname: "${indf} >> ${parf1}${i}
+    echo "poplistname: "${pt1}${of1}".pop"${i} >> ${parf1}${i} 
+    echo "evecoutname: "${pt1}${of1}"_"${i}".evec" >> ${parf1}${i}
+    echo "evaloutname: "${pt1}${of1}"_"${i}".eval" >> ${parf1}${i}
+    echo -e "altnormstype: NO\nnumoutevec: 10\nnumoutlieriter: 0\nnumoutlierevec: 0" >> ${parf1}${i}
+    echo -e "outliersigmathresh: 6.0\nnumthreads: 8\nqtmode: 0\nlsqproject: YES" >> ${parf1}${i}
+done
+
+## Run smartpca
+for i in $(seq 1 3); do
+    sbatch -c 8 --mem 15000 --wrap="smartpca -p ${parf1}${i}"
+done
+
+
+
+
+
+##################################################
+## 3. Find population structure from ADMIXTURE  ##
+##################################################
+
+cd /home/projects1/UmingmakMuskox/analysis/structure/
+mkdir -p ./Admixture_GR_260111/; cd ./Admixture_GR_260111/
+
+## WGS+REF+EL012 variant calling and pseudo-haploid pulldown with mappable filter (2316K)
+snpf="/home/projects1/UmingmakMuskox/genotypes/251120_WGS_REF_EL012_Muskox/WGS.REF.GR.Muskox.mappable.filtered.snp"
+genf="/home/projects1/UmingmakMuskox/genotypes/251120_WGS_REF_EL012_Muskox/WGS.REF.GR.Muskox.mappable.filtered.geno"
+indf="/home/projects1/UmingmakMuskox/genotypes/251120_WGS_REF_EL012_Muskox/WGS.REF.GR.Muskox.ind"
+
+pt1=($(pwd)"/")
+
+of1="Admixture_GR_260111"
+tn1="WGS.GR.Muskox"
+
+## Remove takin genotypes
+cat ${indf} | grep -v Tak > ${tn1}.ind
+cat ${genf} | cut -c -141 > ${tn1}.geno
+cp ${snpf} ${tn1}.snp
+
+## Convert eigenstrat format to PED
+echo -e "genotypename:\t"${pt1}${tn1}".geno" > "par_WGS.GR.EIGENSTRAT.PED"
+echo -e "snpname:\t"${pt1}${tn1}".snp" >> "par_WGS.GR.EIGENSTRAT.PED"
+echo -e "indivname:\t"${pt1}${tn1}".ind" >> "par_WGS.GR.EIGENSTRAT.PED"
+echo -e "outputformat:\tPED" >> "par_WGS.GR.EIGENSTRAT.PED"
+echo -e "genotypeoutname:\t"${of1}".ped" >> "par_WGS.GR.EIGENSTRAT.PED"
+echo -e "snpoutname:\t"${of1}".pedsnp" >> "par_WGS.GR.EIGENSTRAT.PED"
+echo -e "indivoutname:\t"${of1}".pedind" >> "par_WGS.GR.EIGENSTRAT.PED"
+
+sbatch -c 4 --mem 5000 --wrap="convertf -p par_WGS.GR.EIGENSTRAT.PED"
+
+## Make map file from pedsnp
+awk '{OFS="\t"}{print $1,$2,$3,$4}' ${of1}.pedsnp > ${of1}.map
+
+## Plink make-bed
+plink --file ${of1} --chr-set 23 no-xy no-mt --allow-no-sex --make-bed --out ${of1}_temp_1
+
+## Then remove rare alleles (maf < 1%) and prune by LD
+plink --bfile ${of1}_temp_1 --chr-set 23 no-xy no-mt --allow-no-sex --indep-pairwise 200 25 0.6 --out ${of1}_temp_3
+plink --bfile ${of1}_temp_1 --chr-set 23 no-xy no-mt --extract ${of1}_temp_3.prune.in --make-bed --out ${of1}_temp_3  ## 550,442 remained
+
+for K in bed bim fam; do cp ${of1}_temp_3.${K} ${of1}.${K}; done
+# rm ${of1}_temp_*
+
+## Make directories for result set
+for J in $(seq 1 10); do 
+  mkdir "Set_"${J}
+done
+
+scf=${pt1}"WGS_GR_251113.sh"
+file="Admixture_GR_260111"
+
+sbatch --array=1-10 -c 8 --mem 10000 -J admixture --wrap=${scf}" "${file}
+
+
+#######################################
+## Saving belows as WGS_GR_251113.sh ##
+
+#!/bin/bash
+
+pt1=($(pwd)"/")
+
+filename=$1
+inum=$SLURM_ARRAY_TASK_ID
+
+cd ${pt1}"Set_"${inum}
+for K in $(seq 2 8); do
+  admixture -s time --cv ${pt1}${filename}.bed ${K} > ${pt1}"Set_"${J}/${filename}_set${J}_${K}.log
+done
