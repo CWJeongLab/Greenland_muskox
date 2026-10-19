@@ -1,0 +1,93 @@
+##########################
+## 1. qpGraph searching ##
+##########################
+
+## R
+library(tidyverse)
+library(dplyr)
+library(admixtools)
+
+fn1 <- "/home/projects1/UmingmakMuskox/analysis/Fstatistics/moments_260111_GR/GR.Muskox.PMRtrim"
+maxm <- 10000
+
+bf = "backbone0_CaME_GrEN"
+bf = "backbone1_CaME_GrN_GrEN"
+
+## Save the tree topology under the format of bf.csv
+## Below is the example for backbone0_CaME_GrEN
+V1,V2
+R,Tak
+R,MM
+MM,CaME_BL
+MM,GrEN_ZA
+
+## Below is the example for backbone1_CaME_PopX_GrEN
+V1,V2
+R,Tak
+R,MM
+MM,BGM1
+MM,WFM1
+BGM1,CaME_BL
+BGM1,BGM2
+BGM2,PX
+WFM1,GrEN_ZA
+WFM1,WFM2
+WFM2,PX
+PX,GrN_MS
+
+
+
+
+
+###########
+
+obackbone <- read.csv(paste(bf, ".csv", sep=""))
+if (sum(duplicated(obackbone[2])) != 0) { 
+  backbone <- rbind(obackbone[obackbone[2] != obackbone[2][duplicated(obackbone[2]),],], obackbone[obackbone[2] == obackbone[2][duplicated(obackbone[2]),],]) } else { 
+  backbone <- obackbone 
+}
+
+## This is for backbone tree using Tak, CaME_BL, GrN_MS, GrEN_ZA
+backbone_pops <- c("Tak","CaME_BL","GrEN_ZA","GrN_MS")
+f2 <- f2_from_geno(fn1,pops=backbone_pops, maxmiss=0, auto_only = F, poly_only=F, blgsize=0.05, maxmem=maxm)
+
+backbone_qpg_results <- qpgraph(f2, backbone, return_fstats=TRUE)
+wz = backbone_qpg_results$f4[abs(backbone_qpg_results$f4$z) == backbone_qpg_results$worst_residual,]
+wzp = paste("f4(", wz[1,1], ", ",  wz[1,2], "; ",  wz[1,3], ", ",  wz[1,4], ")", sep="")
+pdf(paste0(bf, ".pdf"), height=7, width=10)
+print(plot_graph(backbone_qpg_results$edges, title=paste(wzp, "\nworst |Z|: ", round(wz$z[1],2), "\nscore: ", round(backbone_qpg_results$score,2), sep=""), textsize=3))
+dev.off()
+
+## This is for adding CaIN_GF
+target <- "CaIN_GF"
+my_pops <- c(backbone_pops, target)
+f2 <- f2_from_geno(fn1,pops=my_pops, maxmiss=0, auto_only = F, poly_only=F, blgsize=0.05, maxmem=maxm)
+
+obackbone <- read.csv(paste(bf, ".csv", sep=""))
+if (sum(duplicated(obackbone[2])) != 0) { 
+  backbone <- obackbone[obackbone[2] != obackbone[2][duplicated(obackbone[2]),],]
+  obackbone <- rbind(obackbone[obackbone[2] != obackbone[2][duplicated(obackbone[2]),],], obackbone[obackbone[2] == obackbone[2][duplicated(obackbone[2]),],]) } else { 
+  backbone <- obackbone 
+}
+
+target1 <- paste(target, 0, sep=""); target2=paste(target, 1, sep=""); target3=paste(target, 2, sep=""); target4=paste(target, 3, sep=""); target5=paste(target, 4, sep="")
+e1ways <- lapply(1:nrow(backbone), function(x) { rbind(obackbone[-x,], c(backbone[x,1], target1), c(target1, backbone[x,2]), c(target1, target)) })
+e2ways <- lapply(1:(nrow(backbone)-1), function(x) { lapply((x+1):nrow(backbone), function(y) 
+  { rbind(obackbone[c(-x, -y),], c(backbone[x,1], target1), c(target1, backbone[x,2]), c(target1, target2), c(backbone[y,1], target3), c(target3, backbone[y,2]), c(target3, target4), c(target4, target5), c(target2, target5), c(target5, target)) }) })
+
+e1results <- lapply(e1ways, function(x) { qpgraph(f2, x, return_fstats=TRUE) })
+e2results <- lapply(e2ways, function(x) { lapply(x, function(y) { qpgraph(f2, y, return_fstats=TRUE) }) })
+
+pdf(paste(bf, "+", target, ".pdf", sep=""), height=7, width=10)
+lapply(e1ways, function(x) { 
+  qpg_results <- qpgraph(f2, x, return_fstats=TRUE); wz = qpg_results$f4[abs(qpg_results$f4$z) == qpg_results$worst_residual,]; 
+  wzp = paste("f4(", wz[1,1], ", ",  wz[1,2], "; ",  wz[1,3], ", ",  wz[1,4], ")", sep=""); 
+  plot_graph(qpg_results$edges,title=paste(wzp, "\nworst |Z|: ", round(wz$z[1],2), "\nscore: ", round(qpg_results$score,2), sep=""), textsize=3) })
+lapply(e2ways, function(x) { lapply(x, function(y) { 
+  qpg_results <- qpgraph(f2, y, return_fstats=TRUE); wz = qpg_results$f4[abs(qpg_results$f4$z) == qpg_results$worst_residual,]; 
+  wzp = paste("f4(", wz[1,1], ", ",  wz[1,2], "; ",  wz[1,3], ", ",  wz[1,4], ")", sep=""); 
+  plot_graph(qpg_results$edges,title=paste(wzp, "\nworst |Z|: ", round(wz$z[1],2), "\nscore: ", round(qpg_results$score,2), sep=""), textsize=3) }) })
+dev.off()
+
+save(backbone_pops, backbone_qpg_results, my_pops, e1results, e2results, e1ways, e2ways, target, file=paste0(bf, "+CaIN.Rdata"))
+

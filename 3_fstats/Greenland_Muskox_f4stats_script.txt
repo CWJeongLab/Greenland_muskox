@@ -1,0 +1,75 @@
+#############################
+## 1. Muskox moments test  ##
+#############################
+
+cd /home/projects1/UmingmakMuskox/analysis/Fstatistics/
+mkdir -p moments_260111_GR/; cd moments_260111_GR/
+
+pt1=($(pwd)"/")
+snpf="/home/projects1/UmingmakMuskox/genotypes/251120_WGS_REF_EL012_Muskox/WGS.REF.GR.Muskox.mappable.filtered.snp"
+genf="/home/projects1/UmingmakMuskox/genotypes/251120_WGS_REF_EL012_Muskox/WGS.REF.GR.Muskox.mappable.filtered.geno"
+indf="/home/projects1/UmingmakMuskox/genotypes/251120_WGS_REF_EL012_Muskox/WGS.REF.GR.Muskox.ind"
+of1=${pt1}"GR.Muskox.PMRtrim"
+
+# copy and trim the related individuals
+cat ${indf} | grep -v BI-38 | grep -v CH-3 | grep -v CH-4 > ${of1}.ind
+cat ${genf} | cut -c 1-13,15-28,31-145 > ${of1}.geno
+cp ${snpf} ${of1}.snp
+
+# convert to plink format
+echo "genotypename: "${of1}".geno" > ${of1}.par
+echo "snpname: "${of1}".snp" >> ${of1}.par
+echo "indivname: "${of1}".ind" >> ${of1}.par
+echo "outputformat:    PACKEDPED" >> ${of1}.par
+echo "genotypeoutname: "${of1}.bed >> ${of1}.par
+echo "snpoutname: "${of1}.bim >> ${of1}.par
+echo "indivoutname:  "${of1}.fam >> ${of1}.par
+
+sbatch -c 12 --mem 22000 --wrap="convertf -p "${of1}".par"
+
+# reformat
+paste ${of1}.ind ${of1}.fam | awk '{OFS="\t"} {print $3, $1, $6, $7, $8, $9}' > temp
+mv temp ${of1}.fam
+
+############## 
+
+~/.conda/envs/Admixtools/bin/R
+
+rm = list()
+library(admixtools)
+library(tidyverse)
+library(gridExtra)
+
+fn1 <- "/home/projects1/UmingmakMuskox/analysis/Fstatistics/moments_260111_GR/GR.Muskox.PMRtrim"
+indf <- "/home/projects1/UmingmakMuskox/analysis/Fstatistics/moments_260111_GR/GR.Muskox.PMRtrim.ind" 
+info <- read.table(indf,header=F, col.names = c("IID","SEX","PID"))
+
+pids <- unique(info$PID)
+og <- "Tak" 
+p1s <- pids[grep("CaMW",pids)]
+p2s <- pids[grep("CaME",pids)]
+p3s <- pids[grep("CaIN",pids)]
+p4s <- pids[grep("CaIS",pids)]
+p5s <- pids[grep("GrN",pids)]
+p6s <- pids[grep("GrEN",pids)]
+p7s <- pids[grep("GrES",pids)]
+
+## f4 (Takin, Siberian; BGM, WFM)
+of1 <- "./f4_sym_BGM_WFM.260111"
+pop1 <- og
+pop2 <- "SibE_WI"
+pop3 <- c(p1s,p2s)
+pop4 <- c(p3s,p4s,p5s,p6s,p7s)
+df <- subset(f4(fn1,pop1,pop2,pop3,pop4, auto_only=F, poly_only=F, blgsize=5e6), pop2!=pop3 & pop2!=pop4 & pop3!=pop4)
+table.name <- paste0(of1,".txt")
+write.table(df, file=table.name, quote=F, sep="\t", row.names=F)
+
+## f4 (Takin, Canadian; Greenland, Greenland)
+of1 <- "./f4_sym_CAN_GRN.260111"
+pop1 <- og
+pop2 <- c(p1s,p2s,p3s,p4s)
+pop3 <- c(p5s,p6s,p7s)
+pop4 <- c(p5s,p6s,p7s)
+df <- subset(f4(fn1,pop1,pop2,pop3,pop4, auto_only=F, poly_only=F, blgsize=5e6), pop2!=pop3 & pop2!=pop4 & pop3!=pop4)
+table.name <- paste0(of1,".txt")
+write.table(df, file=table.name, quote=F, sep="\t", row.names=F)
